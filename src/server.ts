@@ -15,7 +15,9 @@ import { aggregateToEmployees } from "./logic/aggregate.js";
 // ---- TS augmentation so req.session is typed ----
 declare global {
   namespace Express {
-    interface Request { session?: Record<string, any>; }
+    interface Request {
+      session?: Record<string, any>;
+    }
   }
 }
 
@@ -25,23 +27,35 @@ const app = express();
 app.use(rateLimit({ windowMs: 60_000, max: 60 }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(cookieSession({
-  name: "sid",
-  secret: process.env.SESSION_SECRET || "dev_secret",
-  maxAge: 7 * 24 * 60 * 60 * 1000,
-  httpOnly: true,
-  sameSite: "lax",
-}));
+app.use(
+  cookieSession({
+    name: "sid",
+    secret: process.env.SESSION_SECRET || "dev_secret",
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+    httpOnly: true,
+    sameSite: "lax",
+  })
+);
+
+// Serve local avatar files, e.g. /avatars/dan.jpg
+app.use("/avatars", express.static("public/avatars", { maxAge: "7d" }));
+
+// serve /public (for /avatars/*.jpg etc.)
+app.use(express.static("public", { maxAge: "1d" }));
+
 
 /* =========================
    OIDC (separate LinkedIn app)
    ========================= */
 const OIDC_CLIENT_ID = process.env.OIDC_CLIENT_ID || "";
 const OIDC_CLIENT_SECRET = process.env.OIDC_CLIENT_SECRET || "";
-const OIDC_ENABLED = String(process.env.OIDC_ENABLED || "false").toLowerCase() === "true";
-const OIDC_REDIRECT_URI = process.env.OIDC_REDIRECT_URI || "http://localhost:3000/oidc/callback";
+const OIDC_ENABLED =
+  String(process.env.OIDC_ENABLED || "false").toLowerCase() === "true";
+const OIDC_REDIRECT_URI =
+  process.env.OIDC_REDIRECT_URI || "http://localhost:3000/oidc/callback";
 const OIDC_WELL_KNOWN =
-  process.env.OIDC_WELL_KNOWN || "https://www.linkedin.com/oauth/.well-known/openid-configuration";
+  process.env.OIDC_WELL_KNOWN ||
+  "https://www.linkedin.com/oauth/.well-known/openid-configuration";
 
 type OidcConfig = {
   authorization_endpoint: string;
@@ -68,6 +82,8 @@ const randomStr = (len = 24) => b64url(randomBytes(len));
 /* ===============
    Core aggregation
    =============== */
+type Emp = { urn: string; name: string; avatar?: string | null };
+
 async function fetchAggregated() {
   const li = cfg.mock ? new MockLinkedIn() : new RestLinkedIn();
   const orgUrn = await li.getOrgUrnFromVanity(cfg.vanity);
@@ -90,24 +106,35 @@ async function fetchAggregated() {
   }
 
   const employees = aggregateToEmployees(tallies);
+
+  // Enrich with directory (names/avatars from employees.json)
+  const directory = new Map((await readEmployees()).map((e) => [e.urn, e]));
+  const enriched = employees.map((r: any) => {
+    const m = directory.get(r.urn) as Emp | undefined;
+    return {
+      ...r,
+      name: m?.name || r.name,
+      avatar: m?.avatar || null,
+    };
+  });
+
   return {
     mode: cfg.mock ? "MOCK" : "LIVE",
     vanity: cfg.vanity,
     orgUrn,
     postsCount: posts.length,
-    employees,
+    employees: enriched,
   };
 }
 
 /* ===============================
    employees.json helpers + guard
    =============================== */
-type Emp = { urn: string; name: string };
 async function readEmployees(): Promise<Emp[]> {
   try {
     const txt = await fsp.readFile("./employees.json", "utf8");
     const arr = JSON.parse(txt);
-    return Array.isArray(arr) ? arr : [];
+    return Array.isArray(arr) ? (arr as Emp[]) : [];
   } catch {
     return [];
   }
@@ -118,7 +145,11 @@ async function writeEmployees(arr: Emp[]) {
   await fsp.rename(tmp, "./employees.json");
 }
 const ADMIN_KEY = process.env.ADMIN_KEY || "";
-function requireKey(req: express.Request, res: express.Response, next: express.NextFunction) {
+function requireKey(
+  req: express.Request,
+  res: express.Response,
+  next: express.NextFunction
+) {
   const key = String(req.query.key || "");
   if (!ADMIN_KEY || key !== ADMIN_KEY) {
     return res.status(401).send("Unauthorized. Append ?key=YOUR_ADMIN_KEY.");
@@ -161,6 +192,9 @@ const UI_HTML = String.raw`<!doctype html>
     tbody tr:nth-child(even){background:#f8fcf9} tbody tr:nth-child(odd){background:#fff} tbody tr:hover{background:var(--mist)}
     code{background:rgba(14,47,37,.08);padding:2px 6px;border-radius:6px}
     .pill{margin-left:auto;background:rgba(10,239,132,.18);color:#083924;padding:6px 10px;border-radius:999px;font-weight:600;font-size:12px}
+    .namecell{display:flex;align-items:center;gap:10px}
+    .avatar{width:28px;height:28px;border-radius:50%;object-fit:cover;border:1px solid rgba(0,0,0,.08);background:#fff}
+    .avatar--placeholder{width:28px;height:28px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;background:#DEEDB8;color:#0D1A13;font-weight:700;font-size:12px;border:1px solid rgba(0,0,0,.06)}
   </style>
 </head>
 <body>
@@ -176,6 +210,21 @@ const UI_HTML = String.raw`<!doctype html>
     <tbody></tbody>
   </table>
 <script>
+function initials(n){
+  return (n||"").trim().split(/\s+/).map(s=>s[0]||"").slice(0,2).join("").toUpperCase();
+}
+
+// turn a stored avatar value into a safe <img src>
+// - local: "/avatars/jane.jpg"   -> use as-is
+// - remote: "https://media.licdn.com/..." -> /avatar-proxy?u=...
+function asAvatarSrc(url){
+  if (!url) return "";
+  try {
+    if (url.startsWith("/")) return url;                         // local file
+    if (/^https?:\/\//i.test(url)) return "/avatar-proxy?u="+encodeURIComponent(url); // proxied
+  } catch {}
+  return "";
+}
 (async function(){
   const res = await fetch('/employee-interactions');
   if (!res.ok) { document.body.innerHTML = '<p>Failed to load.</p>'; return; }
@@ -183,12 +232,20 @@ const UI_HTML = String.raw`<!doctype html>
   document.getElementById('modePill').textContent = data.mode;
   document.getElementById('meta').textContent =
     'Vanity: ' + data.vanity + ' | Org URN: ' + data.orgUrn + ' | Posts scanned: ' + data.postsCount;
-  const tbody = document.querySelector('#tbl tbody'); tbody.innerHTML = '';
+
+  const tbody = document.querySelector('#tbl tbody'); 
+  tbody.innerHTML = '';
+
   data.employees.forEach((row, i) => {
+    const src = asAvatarSrc(row.avatar);
+    const imgHtml = src
+      ? '<img class="avatar" src="'+src+'" referrerpolicy="no-referrer" alt="">'
+      : '<span class="avatar avatar--placeholder">'+initials(row.name)+'</span>';
+
     const tr = document.createElement('tr');
     tr.innerHTML =
       '<td>'+(i+1)+'</td>'+
-      '<td>'+row.name+'</td>'+
+      '<td><div class="namecell">'+ imgHtml + '<span>'+row.name+'</span></div></td>'+
       '<td>'+row.total+'</td>'+
       '<td>'+row.reactions+'</td>'+
       '<td>'+row.comments+'</td>'+
@@ -204,17 +261,49 @@ app.get("/ui", (_req, res) => {
   res.send(UI_HTML);
 });
 
-// --- JSON & CSV ---
-app.get("/employee-interactions", async (_req, res) => {
-  try { res.json(await fetchAggregated()); }
-  catch (e: any) { res.status(500).json({ error: e.message }); }
+// Proxy external avatar URLs through our server (avoids blockers/CORS)
+app.get("/avatar-proxy", async (req, res) => {
+  try {
+    const u = String(req.query.u || "");
+    if (!u.startsWith("http")) throw new Error("bad url");
+
+    const r = await fetch(u);
+    if (!r.ok) throw new Error(`upstream ${r.status}`);
+
+    const ct = r.headers.get("content-type") || "image/jpeg";
+    const buf = Buffer.from(await r.arrayBuffer());
+    res.setHeader("Content-Type", ct);
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    res.end(buf);
+  } catch (e: any) {
+    res.status(404).end();
+  }
 });
 
-function toCsv(rows: Array<{ name: string; total: number; reactions: number; comments: number; urn: string }>) {
+// --- JSON & CSV ---
+app.get("/employee-interactions", async (_req, res) => {
+  try {
+    res.json(await fetchAggregated());
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+function toCsv(
+  rows: Array<{
+    name: string;
+    total: number;
+    reactions: number;
+    comments: number;
+    urn: string;
+    avatar?: string | null;
+  }>
+) {
   const hdr = ["Name", "Total", "Reactions", "Comments", "URN"];
   const esc = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
   const lines = [hdr.map(esc).join(",")];
-  for (const r of rows) lines.push([r.name, r.total, r.reactions, r.comments, r.urn].map(esc).join(","));
+  for (const r of rows)
+    lines.push([r.name, r.total, r.reactions, r.comments, r.urn].map(esc).join(","));
   return lines.join("\n");
 }
 app.get("/export.csv", async (_req, res) => {
@@ -222,14 +311,20 @@ app.get("/export.csv", async (_req, res) => {
     const { employees, vanity, mode } = await fetchAggregated();
     const csv = toCsv(employees);
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
-    res.setHeader("Content-Disposition", `attachment; filename="employee-interactions-${vanity}-${mode}.csv"`);
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="employee-interactions-${vanity}-${mode}.csv"`
+    );
     res.send(csv);
-  } catch (e: any) { res.status(500).send("CSV export failed: " + e.message); }
+  } catch (e: any) {
+    res.status(500).send("CSV export failed: " + e.message);
+  }
 });
 
 // --- LinkedIn REST OAuth (App A: Community) ---
 app.get("/login", (_req, res) => {
-  if (cfg.mock) return res.send("MOCK mode is on. Set MOCK=false in .env to use real OAuth.");
+  if (cfg.mock)
+    return res.send("MOCK mode is on. Set MOCK=false in .env to use real OAuth.");
   const scope = encodeURIComponent("r_organization_social_feed r_organization_social");
   const url =
     `https://www.linkedin.com/oauth/v2/authorization` +
@@ -245,7 +340,9 @@ app.get("/callback", async (req, res) => {
     const code = String((req.query as any).code || "");
     if (!code) throw new Error("No code");
     await exchangeCodeForToken(code);
-    res.send("✅ Auth complete. Now hit <a href='/employee-interactions'>/employee-interactions</a>.");
+    res.send(
+      "✅ Auth complete. Now hit <a href='/employee-interactions'>/employee-interactions</a>."
+    );
   } catch (e: any) {
     res.status(500).send(`OAuth error: ${e.message}`);
   }
@@ -261,32 +358,54 @@ app.get("/unmapped-urns", requireKey, async (_req, res) => {
     const counts = new Map<string, number>();
     const bump = (u: string) => counts.set(u, (counts.get(u) || 0) + 1);
     for (const postUrn of posts) {
-      const [reactors, commenters] = await Promise.all([li.getReactors(postUrn), li.getCommenters(postUrn)]);
-      reactors.concat(commenters).filter(u => u?.startsWith("urn:li:person:")).forEach(bump);
+      const [reactors, commenters] = await Promise.all([
+        li.getReactors(postUrn),
+        li.getCommenters(postUrn),
+      ]);
+      reactors
+        .concat(commenters)
+        .filter((u) => u?.startsWith("urn:li:person:"))
+        .forEach(bump);
     }
-    const known = new Set((await readEmployees()).map(e => e.urn));
+    const known = new Set((await readEmployees()).map((e) => e.urn));
     const unmapped = [...counts.entries()]
       .filter(([urn]) => !known.has(urn))
       .map(([urn, interactions]) => ({ urn, interactions }))
       .sort((a, b) => b.interactions - a.interactions);
 
     res.json({ orgUrn, postsScanned: posts.length, count: unmapped.length, unmapped });
-  } catch (e: any) { res.status(500).json({ error: e.message }); }
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 app.post("/add-employee", requireKey, async (req, res) => {
   try {
     const urn = String(req.body?.urn || "").trim();
     const name = String(req.body?.name || "").trim();
-    if (!urn.startsWith("urn:li:person:")) return res.status(400).json({ error: "Valid person URN required (urn:li:person:...)." });
+    const avatarRaw = String(req.body?.avatar || "").trim();
+    const avatar = avatarRaw ? avatarRaw : undefined;
+
+    if (!urn.startsWith("urn:li:person:"))
+      return res
+        .status(400)
+        .json({ error: "Valid person URN required (urn:li:person:...). " });
     if (name.length < 2) return res.status(400).json({ error: "Name is required." });
 
     const rows = await readEmployees();
-    if (rows.some(e => e.urn === urn)) return res.json({ ok: true, message: "Already present." });
-    rows.push({ urn, name });
+    const idx = rows.findIndex((e) => e.urn === urn);
+    if (idx >= 0) {
+      rows[idx].name = name;
+      if (avatar) rows[idx].avatar = avatar;
+    } else {
+      rows.push({ urn, name, avatar });
+    }
     rows.sort((a, b) => a.name.localeCompare(b.name));
     await writeEmployees(rows);
-    res.json({ ok: true, added: { urn, name } });
-  } catch (e: any) { res.status(500).json({ error: e.message }); }
+
+    res.json({ ok: true, saved: { urn, name, avatar: avatar || null } });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // --- Admin HTML + route ---
@@ -330,8 +449,9 @@ const ADMIN_HTML = String.raw`<!doctype html>
   <h3 style="margin-top:0">Manual Add</h3>
   <form id="addform">
     <label>URN <input id="urn" size="44" placeholder="urn:li:person:..." required></label>
-    <label>Name <input id="name" size="28" placeholder="Jane Smith" required></label>
-    <button type="submit">Add</button>
+    <label>Name <input id="name" size="20" placeholder="Jane Smith" required></label>
+    <label>Avatar URL <input id="avatar" size="36" placeholder="/avatars/jane.jpg or https://..."></label>
+    <button type="submit">Add / Update</button>
     <span id="msg" style="margin-left:8px;"></span>
   </form>
 </div>
@@ -350,7 +470,8 @@ async function refresh(){
   data.unmapped.forEach((u, i)=>{
     const tr = document.createElement('tr');
     tr.innerHTML = '<td>'+(i+1)+'</td><td><code>'+u.urn+'</code></td><td>'+u.interactions+'</td>'+
-      '<td><input placeholder="Full name" size="24" id="name-'+i+'"> '+
+      '<td><input placeholder="Full name" size="20" id="name-'+i+'"> '+
+      '<input placeholder="Avatar URL (optional)" size="28" id="avatar-'+i+'"> '+
       '<button data-urn="'+u.urn+'" data-idx="'+i+'">Add</button></td>';
     tb.appendChild(tr);
   });
@@ -359,25 +480,26 @@ async function refresh(){
       const urn = ev.target.getAttribute('data-urn');
       const idx = ev.target.getAttribute('data-idx');
       const name = q('#name-'+idx).value.trim();
+      const avatar = q('#avatar-'+idx).value.trim();
       if(!name) return alert('Enter a name');
-      await add(urn, name);
+      await add(urn, name, avatar);
     });
   });
 }
 
-async function add(urn, name){
+async function add(urn, name, avatar){
   const r = await fetch('/add-employee?key='+encodeURIComponent(key), {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ urn, name })
+    body: JSON.stringify({ urn, name, avatar })
   });
   const j = await r.json();
-  q('#msg').textContent = r.ok ? 'Added.' : (j.error || 'Failed.');
+  q('#msg').textContent = r.ok ? 'Saved.' : (j.error || 'Failed.');
   if(r.ok) refresh();
 }
 
 q('#addform').addEventListener('submit', async (e)=>{
   e.preventDefault();
-  await add(q('#urn').value.trim(), q('#name').value.trim());
+  await add(q('#urn').value.trim(), q('#name').value.trim(), q('#avatar').value.trim());
 });
 
 refresh();
@@ -391,7 +513,8 @@ app.get("/admin", requireKey, (_req, res) => {
 
 // --- OIDC routes (App B: OIDC) ---
 app.get("/login-oidc", async (req, res) => {
-  if (!OIDC_ENABLED) return res.status(503).send("OIDC is disabled. Set OIDC_ENABLED=true in .env.");
+  if (!OIDC_ENABLED)
+    return res.status(503).send("OIDC is disabled. Set OIDC_ENABLED=true in .env.");
   try {
     const conf = await discover();
     const state = randomStr();
@@ -409,7 +532,9 @@ app.get("/login-oidc", async (req, res) => {
     u.searchParams.set("prompt", "consent");
 
     res.redirect(u.toString());
-  } catch (e: any) { res.status(500).send("OIDC init error: " + e.message); }
+  } catch (e: any) {
+    res.status(500).send("OIDC init error: " + e.message);
+  }
 });
 
 app.get("/oidc/callback", async (req, res) => {
@@ -441,15 +566,23 @@ app.get("/oidc/callback", async (req, res) => {
       if (payload) {
         try {
           const c = JSON.parse(b64urlDecode(payload));
-          const nameFromToken =
-            (c.name ?? [c.given_name, c.family_name].filter(Boolean).join(" ")) || null;
+          // name
+          let nameFromToken: string | null = null;
+          if (typeof c.name === "string" && c.name.trim()) {
+            nameFromToken = c.name.trim();
+          } else {
+            const parts = [c.given_name, c.family_name].filter(Boolean).join(" ");
+            nameFromToken = parts || null;
+          }
           user = {
             sub: c.sub,
             name: nameFromToken,
-            email: c.email ?? null,
-            picture: c.picture ?? null,
+            email: typeof c.email === "string" ? c.email : null,
+            picture: typeof c.picture === "string" ? c.picture : null,
           };
-        } catch { /* ignore; try userinfo below */ }
+        } catch {
+          // ignore; try userinfo below
+        }
       }
     }
 
@@ -460,28 +593,68 @@ app.get("/oidc/callback", async (req, res) => {
       });
       if (ur.ok) {
         const p: any = await ur.json();
-        const nameFromUI =
-          (p.name ?? [p.given_name, p.family_name].filter(Boolean).join(" ")) || null;
+        let nameFromUI: string | null = null;
+        if (typeof p.name === "string" && p.name.trim()) {
+          nameFromUI = p.name.trim();
+        } else {
+          const parts = [p.given_name, p.family_name].filter(Boolean).join(" ");
+          nameFromUI = parts || null;
+        }
         user = {
           sub: p.sub,
           name: nameFromUI,
-          email: p.email ?? null,
-          picture: p.picture ?? null,
+          email: typeof p.email === "string" ? p.email : null,
+          picture: typeof p.picture === "string" ? p.picture : null,
         };
       }
     }
 
     if (!user) throw new Error("Could not obtain user claims");
+
+    // Store session user
     req.session = { ...(req.session || {}), user };
+
+    // ---- Auto-upsert this member into employees.json (name + avatar) ----
+    // LinkedIn OIDC 'sub' is usually a member id; sometimes a URN.
+    const subStr = String(user.sub || "");
+    const myUrn = subStr.startsWith("urn:")
+      ? subStr
+      : `urn:li:person:${subStr}`;
+
+    try {
+      const rows = await readEmployees();
+      const idx = rows.findIndex((e) => e.urn === myUrn);
+      if (idx >= 0) {
+        if (user.name) rows[idx].name = user.name;
+        if (user.picture) rows[idx].avatar = user.picture;
+      } else {
+        rows.push({
+          urn: myUrn,
+          name: user.name || "Unknown",
+          avatar: user.picture || null,
+        });
+      }
+      rows.sort((a, b) => a.name.localeCompare(b.name));
+      await writeEmployees(rows);
+    } catch {
+      // non-fatal; continue to UI
+    }
+    // ---------------------------------------------------------------------
+
     res.redirect("/ui");
-  } catch (e: any) { res.status(500).send("OIDC callback error: " + e.message); }
+  } catch (e: any) {
+    res.status(500).send("OIDC callback error: " + e.message);
+  }
 });
 
 // --- OIDC debug helpers ---
 app.get("/oidc/.well-known", async (_req, res) => {
   if (!OIDC_ENABLED) return res.status(503).send("OIDC disabled");
-  try { res.json(await discover()); }
-  catch (e: any) { res.status(500).send("Discovery error: " + e.message); }
+  try {
+    res.json(await discover());
+  } catch (e: any) {
+    res.status(500).send("Discovery error: " + e.message);
+  }
 });
 app.get("/oidc/auth-url", async (req, res) => {
   if (!OIDC_ENABLED) return res.status(503).send("OIDC disabled");
@@ -500,10 +673,25 @@ app.get("/oidc/auth-url", async (req, res) => {
     u.searchParams.set("state", state);
     u.searchParams.set("nonce", nonce);
     res.type("text/plain").send(u.toString());
-  } catch (e: any) { res.status(500).send("Auth URL error: " + e.message); }
+  } catch (e: any) {
+    res.status(500).send("Auth URL error: " + e.message);
+  }
+});
+
+// Simple helpers to check session / logout if you want them
+app.get("/me.json", (req, res) => {
+  res.json({ user: req.session?.user || null });
+});
+app.get("/logout", (req, res) => {
+  req.session = null as any;
+  res.redirect("/ui");
 });
 
 // --- boot ---
 app.listen(cfg.port, () =>
-  log.info(`Server http://localhost:${cfg.port} (mode=${cfg.mock ? "MOCK" : "LIVE"}, oidc=${OIDC_ENABLED ? "on" : "off"})`)
+  log.info(
+    `Server http://localhost:${cfg.port} (mode=${cfg.mock ? "MOCK" : "LIVE"}, oidc=${
+      OIDC_ENABLED ? "on" : "off"
+    })`
+  )
 );
