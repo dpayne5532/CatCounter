@@ -340,6 +340,108 @@ app.get("/oidc/callback", async (req, res) => {
 app.get("/me.json", (req, res) => res.json({ user: req.session?.user || null }));
 app.get("/logout", (req, res) => { req.session = null as any; res.redirect("/ui"); });
 
+// --- Admin HTML (brand-styled) + route ---
+const ADMIN_HTML = String.raw`<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Employee Mapping Admin</title>
+<style>
+  :root{--green:#0AEF84;--green-deep:#0E2F25;--forest:#123A2D;--ink:#0D1A13;--mist:#DEEDB8;--foam:#EEF3EB;}
+  body{font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial;margin:24px;background:var(--foam);color:var(--ink);}
+  header{display:flex;gap:12px;align-items:center;margin-bottom:16px;padding:14px 16px;border-radius:12px;background:var(--green-deep);color:var(--foam);}
+  h2{margin:0}
+  .button{padding:8px 12px;border-radius:10px;text-decoration:none;border:1px solid transparent;background:var(--green);color:var(--ink);font-weight:600}
+  .panel{background:#fff;border:1px solid rgba(18,58,45,.12);border-radius:12px;padding:16px;margin-bottom:16px}
+  table{border-collapse:collapse;width:100%}
+  th,td{padding:8px 10px;border:1px solid rgba(18,58,45,.12)}
+  th{background:var(--green-deep);color:var(--foam);position:sticky;top:0}
+  tr:nth-child(even){background:#f8fcf9}
+  input,button{padding:8px 10px;border-radius:8px;border:1px solid rgba(18,58,45,.25)}
+  code{background:rgba(14,47,37,.08);padding:2px 6px;border-radius:6px}
+</style>
+</head>
+<body>
+<header>
+  <h2>Employee Mapping Admin</h2>
+  <a class="button" href="/ui">Back to UI</a>
+</header>
+
+<div class="panel">
+  <h3 style="margin-top:0">Unmapped URNs</h3>
+  <p>Members who interacted with your posts but aren’t in <code>employees.json</code>.</p>
+  <div id="meta"></div>
+  <table>
+    <thead><tr><th>#</th><th>URN</th><th>Interactions</th><th>Add as</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+</div>
+
+<div class="panel">
+  <h3 style="margin-top:0">Manual Add</h3>
+  <form id="addform">
+    <label>URN <input id="urn" size="44" placeholder="urn:li:person:..." required></label>
+    <label>Name <input id="name" size="28" placeholder="Jane Smith" required></label>
+    <button type="submit">Add</button>
+    <span id="msg" style="margin-left:8px;"></span>
+  </form>
+</div>
+
+<script>
+const params = new URLSearchParams(location.search);
+const key = params.get('key') || '';
+const q = s => document.querySelector(s);
+
+async function refresh(){
+  const r = await fetch('/unmapped-urns?key='+encodeURIComponent(key));
+  if(!r.ok){ document.body.innerHTML = '<p>Unauthorized or server error.</p>'; return; }
+  const data = await r.json();
+  q('#meta').textContent = 'Org: ' + data.orgUrn + ' | Posts: ' + data.postsScanned + ' | Unmapped: ' + data.count;
+  const tb = q('#rows'); tb.innerHTML='';
+  data.unmapped.forEach((u, i)=>{
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td>'+(i+1)+'</td><td><code>'+u.urn+'</code></td><td>'+u.interactions+'</td>'+
+      '<td><input placeholder="Full name" size="24" id="name-'+i+'"> '+
+      '<button data-urn="'+u.urn+'" data-idx="'+i+'">Add</button></td>';
+    tb.appendChild(tr);
+  });
+  tb.querySelectorAll('button').forEach(btn=>{
+    btn.addEventListener('click', async (ev)=>{
+      const urn = ev.target.getAttribute('data-urn');
+      const idx = ev.target.getAttribute('data-idx');
+      const name = q('#name-'+idx).value.trim();
+      if(!name) return alert('Enter a name');
+      await add(urn, name);
+    });
+  });
+}
+
+async function add(urn, name){
+  const r = await fetch('/add-employee?key='+encodeURIComponent(key), {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ urn, name })
+  });
+  const j = await r.json();
+  q('#msg').textContent = r.ok ? 'Added.' : (j.error || 'Failed.');
+  if(r.ok) refresh();
+}
+
+q('#addform').addEventListener('submit', async (e)=>{
+  e.preventDefault();
+  await add(q('#urn').value.trim(), q('#name').value.trim());
+});
+
+refresh();
+</script>
+</body>
+</html>`;
+
+app.get("/admin", requireKey, (_req, res) => {
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.send(ADMIN_HTML);
+});
+
+
 // ----- boot -----
 app.listen(cfg.port, () =>
   log.info(`Server http://localhost:${cfg.port} (mode=${cfg.mock ? "MOCK" : "LIVE"}, oidc=${OIDC_ENABLED ? "on" : "off"})`)
