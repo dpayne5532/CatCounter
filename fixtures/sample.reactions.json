@@ -1,4 +1,5 @@
 {
   "urn:li:ugcPost:1": ["urn:li:person:AAA", "urn:li:person:BBB", "urn:li:person:870663634"],
-  "urn:li:share:2": ["urn:li:person:AAA", "urn:li:person:870663634", "urn:li:person:20918572"]
+  "urn:li:share:2": ["urn:li:person:AAA", "urn:li:person:870663634", "urn:li:person:20918572"],
+  "urn:li:share:33": ["urn:li:person:ZZZ", "urn:li:person:870663634", "urn:li:person:20918572"]
 }
