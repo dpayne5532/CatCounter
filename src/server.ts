@@ -5,9 +5,16 @@ import { cfg } from "./config.js";
 import { MockLinkedIn } from "./linkedin/mock.js";
 import { RestLinkedIn, exchangeCodeForToken } from "./linkedin/rest.js";
 import { aggregateToEmployees } from "./logic/aggregate.js";
+import { promises as fsp } from "fs";
+import type { Request, Response, NextFunction } from "express";
+
 
 const log = pino({ level: "info" });
 const app = express();
+
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
 
 app.use(rateLimit({ windowMs: 60_000, max: 60 }));
 
@@ -43,6 +50,39 @@ async function fetchAggregated() {
     employees
   };
 }
+
+// ---- employees.json read/write (atomic) ----
+type Emp = { urn: string; name: string };
+
+async function readEmployees(): Promise<Emp[]> {
+  try {
+    const txt = await fsp.readFile("./employees.json", "utf8");
+    const arr = JSON.parse(txt);
+    return Array.isArray(arr) ? arr : [];
+  } catch {
+    return [];
+  }
+}
+
+async function writeEmployees(arr: Emp[]) {
+  const tmp = "./employees.json.tmp";
+  await fsp.writeFile(tmp, JSON.stringify(arr, null, 2), "utf8");
+  await fsp.rename(tmp, "./employees.json"); // atomic replace
+}
+
+// ---- simple auth using ?key=... ----
+const ADMIN_KEY = process.env.ADMIN_KEY || "";
+function requireKey(req: Request, res: Response, next: NextFunction) {
+  const key = String(req.query.key || "");
+  if (!ADMIN_KEY || key !== ADMIN_KEY) {
+    return res.status(401).send("Unauthorized. Append ?key=YOUR_ADMIN_KEY.");
+  }
+  next();
+}
+
+
+
+
 
 // ----- routes -----
 app.get("/", (_req, res) =>
@@ -232,33 +272,163 @@ app.get("/callback", async (req, res) => {
 
 
 // Unmapped URNs seen in interactions (so you can tag them with names)
-app.get("/unmapped-urns", async (_req, res) => {
+app.get("/unmapped-urns", requireKey, async (_req, res) => {
   try {
-    // Recompute raw tallies without filtering to employees.json
     const li = cfg.mock ? new MockLinkedIn() : new RestLinkedIn();
     const orgUrn = await li.getOrgUrnFromVanity(cfg.vanity);
     const posts = await li.getOrgPosts(orgUrn, 100);
 
-    const tallies = new Map<string, number>();
-    const bump = (urn: string) => tallies.set(urn, (tallies.get(urn) || 0) + 1);
+    const counts = new Map<string, number>();
+    const bump = (u: string) => counts.set(u, (counts.get(u) || 0) + 1);
 
     for (const postUrn of posts) {
-      const [reactors, commenters] = await Promise.all([li.getReactors(postUrn), li.getCommenters(postUrn)]);
-      reactors.concat(commenters).forEach(u => { if (u.startsWith("urn:li:person:")) bump(u); });
+      const [reactors, commenters] = await Promise.all([
+        li.getReactors(postUrn),
+        li.getCommenters(postUrn)
+      ]);
+      reactors.concat(commenters)
+        .filter(u => u?.startsWith("urn:li:person:"))
+        .forEach(bump);
     }
 
-    const roster = new Set(JSON.parse(require("fs").readFileSync("./employees.json","utf8")).map((e: any)=>e.urn));
-    const unmapped = [...tallies.entries()]
-      .filter(([urn]) => !roster.has(urn))
+    const known = new Set((await readEmployees()).map(e => e.urn));
+    const unmapped = [...counts.entries()]
+      .filter(([urn]) => !known.has(urn))
       .map(([urn, interactions]) => ({ urn, interactions }))
-      .sort((a,b)=>b.interactions-a.interactions);
+      .sort((a, b) => b.interactions - a.interactions);
 
     res.json({ orgUrn, postsScanned: posts.length, count: unmapped.length, unmapped });
-  } catch (e:any) {
+  } catch (e: any) {
     res.status(500).json({ error: e.message });
   }
 });
 
+app.post("/add-employee", requireKey, async (req, res) => {
+  try {
+    const urn = String(req.body?.urn || "").trim();
+    const name = String(req.body?.name || "").trim();
+
+    if (!urn.startsWith("urn:li:person:")) {
+      return res.status(400).json({ error: "Valid person URN required (urn:li:person:...)." });
+    }
+    if (name.length < 2) {
+      return res.status(400).json({ error: "Name is required." });
+    }
+
+    const rows = await readEmployees();
+    if (rows.some(e => e.urn === urn)) {
+      return res.json({ ok: true, message: "Already present." });
+    }
+
+    rows.push({ urn, name });
+    rows.sort((a, b) => a.name.localeCompare(b.name));
+    await writeEmployees(rows);
+
+    res.json({ ok: true, added: { urn, name } });
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+const ADMIN_HTML = String.raw`<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Employee Mapping Admin</title>
+<style>
+  :root{--green:#0AEF84;--green-deep:#0E2F25;--forest:#123A2D;--ink:#0D1A13;--mist:#DEEDB8;--foam:#EEF3EB;}
+  body{font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial;margin:24px;background:var(--foam);color:var(--ink);}
+  header{display:flex;gap:12px;align-items:center;margin-bottom:16px;padding:14px 16px;border-radius:12px;background:var(--green-deep);color:var(--foam);}
+  h2{margin:0}
+  .button{padding:8px 12px;border-radius:10px;text-decoration:none;border:1px solid transparent;background:var(--green);color:var(--ink);font-weight:600}
+  .panel{background:#fff;border:1px solid rgba(18,58,45,.12);border-radius:12px;padding:16px;margin-bottom:16px}
+  table{border-collapse:collapse;width:100%}
+  th,td{padding:8px 10px;border:1px solid rgba(18,58,45,.12)}
+  th{background:var(--green-deep);color:var(--foam);position:sticky;top:0}
+  tr:nth-child(even){background:#f8fcf9}
+  input,button{padding:8px 10px;border-radius:8px;border:1px solid rgba(18,58,45,.25)}
+  code{background:rgba(14,47,37,.08);padding:2px 6px;border-radius:6px}
+</style>
+</head>
+<body>
+<header>
+  <h2>Employee Mapping Admin</h2>
+  <a class="button" href="/ui">Back to UI</a>
+</header>
+
+<div class="panel">
+  <h3 style="margin-top:0">Unmapped URNs</h3>
+  <p>Members who interacted with your posts but aren’t in <code>employees.json</code>.</p>
+  <div id="meta"></div>
+  <table>
+    <thead><tr><th>#</th><th>URN</th><th>Interactions</th><th>Add as</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+</div>
+
+<div class="panel">
+  <h3 style="margin-top:0">Manual Add</h3>
+  <form id="addform">
+    <label>URN <input id="urn" size="44" placeholder="urn:li:person:..." required></label>
+    <label>Name <input id="name" size="28" placeholder="Jane Smith" required></label>
+    <button type="submit">Add</button>
+    <span id="msg" style="margin-left:8px;"></span>
+  </form>
+</div>
+
+<script>
+const params = new URLSearchParams(location.search);
+const key = params.get('key') || '';
+const q = s => document.querySelector(s);
+
+async function refresh(){
+  const r = await fetch('/unmapped-urns?key='+encodeURIComponent(key));
+  if(!r.ok){ document.body.innerHTML = '<p>Unauthorized or server error.</p>'; return; }
+  const data = await r.json();
+  q('#meta').textContent = 'Org: ' + data.orgUrn + ' | Posts: ' + data.postsScanned + ' | Unmapped: ' + data.count;
+  const tb = q('#rows'); tb.innerHTML='';
+  data.unmapped.forEach((u, i)=>{
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td>'+(i+1)+'</td><td><code>'+u.urn+'</code></td><td>'+u.interactions+'</td>'+
+      '<td><input placeholder="Full name" size="24" id="name-'+i+'"> '+
+      '<button data-urn="'+u.urn+'" data-idx="'+i+'">Add</button></td>';
+    tb.appendChild(tr);
+  });
+  tb.querySelectorAll('button').forEach(btn=>{
+    btn.addEventListener('click', async (ev)=>{
+      const urn = ev.target.getAttribute('data-urn');
+      const idx = ev.target.getAttribute('data-idx');
+      const name = q('#name-'+idx).value.trim();
+      if(!name) return alert('Enter a name');
+      await add(urn, name);
+    });
+  });
+}
+
+async function add(urn, name){
+  const r = await fetch('/add-employee?key='+encodeURIComponent(key), {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ urn, name })
+  });
+  const j = await r.json();
+  q('#msg').textContent = r.ok ? 'Added.' : (j.error || 'Failed.');
+  if(r.ok) refresh();
+}
+
+q('#addform').addEventListener('submit', async (e)=>{
+  e.preventDefault();
+  await add(q('#urn').value.trim(), q('#name').value.trim());
+});
+
+refresh();
+</script>
+</body>
+</html>`;
+
+app.get("/admin", requireKey, (_req, res) => {
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.send(ADMIN_HTML);
+});
 
 
 // boot
