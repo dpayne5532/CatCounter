@@ -23,6 +23,9 @@ declare global {
 
 const log = pino({ level: "info" });
 const app = express();
+const ALLOWED_AVATAR_HOSTS = (process.env.AVATAR_HOSTS ||
+  "media.licdn.com,lh3.googleusercontent.com"
+).split(",").map(h => h.trim().toLowerCase());
 
 app.use(rateLimit({ windowMs: 60_000, max: 60 }));
 app.use(express.json());
@@ -160,16 +163,166 @@ function requireKey(
 /* ======
    Routes
    ====== */
-app.get("/", (_req, res) =>
-  res.send(`<h3>LI Employee Interactions</h3>
-<ul>
-  <li><a href="/ui">Open UI</a></li>
-  <li><a href="/employee-interactions">Raw JSON</a></li>
-  <li><a href="/export.csv">Download CSV</a></li>
-  <li><a href="/login">Login (for live API)</a></li>
-  <li><a href="/login-oidc">Sign in with LinkedIn (OIDC)</a></li>
-</ul>`)
-);
+app.get("/", (_req, res) => {
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.send(LANDING_HTML);
+});
+
+
+
+// --- Landing Page (/) ---
+const LANDING_HTML = String.raw`<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Welcome • Employee Interactions</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root{--green:#0AEF84;--green-deep:#0E2F25;--forest:#123A2D;--ink:#0D1A13;--mist:#DEEDB8;--foam:#EEF3EB;}
+    *{box-sizing:border-box}
+    html,body{height:100%}
+    body{
+      margin:0;
+      font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial;
+      color:var(--ink);
+      background:linear-gradient(180deg, var(--foam), #fff);
+      display:flex; align-items:center; justify-content:center; padding:24px;
+    }
+    .card{
+      width:100%; max-width:780px; background:#fff;
+      border:1px solid rgba(18,58,45,.12); border-radius:16px; padding:24px 24px 28px;
+      box-shadow: 0 10px 30px rgba(0,0,0,.06);
+    }
+    header{display:flex; align-items:center; gap:12px; margin-bottom:8px}
+    .pill{margin-left:auto; background:rgba(10,239,132,.18); color:#083924; padding:6px 10px; border-radius:999px; font-weight:600; font-size:12px}
+    h1{margin:4px 0 6px; letter-spacing:.2px}
+    p.lead{margin:0; color:#294038}
+    .hero{
+      margin-top:18px; display:grid; grid-template-columns:1fr; gap:16px;
+    }
+    .cta-row{display:flex; gap:10px; flex-wrap:wrap; align-items:center}
+    a.btn{
+      display:inline-flex; align-items:center; gap:8px;
+      padding:10px 14px; border-radius:12px; text-decoration:none;
+      background:var(--green); color:#0D1A13; font-weight:700; border:1px solid transparent;
+    }
+    a.btn:hover{filter:brightness(.96)}
+    a.btn.secondary{background:transparent; border-color:rgba(18,58,45,.2); color:var(--ink); font-weight:600}
+    .muted{color:#426050; font-size:13px}
+    .split{
+      margin-top:18px; display:grid; grid-template-columns: 1fr 1fr; gap:16px;
+    }
+    .panel{border:1px solid rgba(18,58,45,.12); border-radius:12px; padding:14px}
+    .me{display:flex; align-items:center; gap:10px}
+    .avatar{width:36px; height:36px; border-radius:50%; object-fit:cover; border:1px solid rgba(0,0,0,.08); background:#fff}
+    .placeholder{display:inline-flex; align-items:center; justify-content:center; width:36px; height:36px; border-radius:50%; background:#DEEDB8; color:#0D1A13; font-weight:800}
+    code{background:rgba(14,47,37,.08); padding:2px 6px; border-radius:6px}
+    @media (max-width:700px){ .split{grid-template-columns:1fr} }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <header>
+      <h1 style="margin:0">Employee Interactions</h1>
+      <span id="modePill" class="pill"></span>
+    </header>
+    <p class="lead">See which employees are engaging with your company posts on LinkedIn.</p>
+
+    <section class="hero">
+      <div class="cta-row">
+        <a id="loginBtn" class="btn" href="/login-oidc">🔐 Log in with LinkedIn</a>
+        <a class="btn secondary" href="/ui">Continue as guest</a>
+        <span id="oidcNote" class="muted"></span>
+      </div>
+      <div class="split">
+        <div class="panel">
+          <strong>What you’ll get</strong>
+          <ul style="margin:8px 0 0 18px;">
+            <li>Top employees by reactions & comments</li>
+            <li>CSV export for reporting</li>
+            <li>Admin mapping for unknown URNs</li>
+          </ul>
+        </div>
+        <div class="panel">
+          <strong>Your status</strong>
+          <div id="me" class="me" style="margin-top:8px;">
+            <span class="placeholder" id="meAvatar">?</span>
+            <div>
+              <div id="meName">Not signed in</div>
+              <div class="muted" id="meEmail"></div>
+            </div>
+          </div>
+          <div style="margin-top:10px;">
+            <a id="dashLink" class="btn secondary" href="/ui" style="display:none">Go to dashboard →</a>
+            <a id="logoutLink" class="muted" href="/logout" style="display:none">Log out</a>
+          </div>
+        </div>
+      </div>
+      <div class="muted">Need to add names/avatars manually? Open <code>/admin?key=YOUR_ADMIN_KEY</code></div>
+    </section>
+  </main>
+
+<script>
+const OIDC_ON = ${JSON.stringify(OIDC_ENABLED)};
+function initials(n){ return (n||"").trim().split(/\\s+/).map(s=>s[0]||"").slice(0,2).join("").toUpperCase(); }
+function asAvatarSrc(url){
+  if(!url) return "";
+  try{
+    if(url.startsWith("/")) return url;
+    if(/^https?:\\/\\//i.test(url)) return "/avatar-proxy?u="+encodeURIComponent(url);
+  }catch{}
+  return "";
+}
+
+(async function init(){
+  document.getElementById('modePill').textContent = ${JSON.stringify(cfg.mock ? "MOCK" : "LIVE")};
+
+  const note = document.getElementById('oidcNote');
+  const loginBtn = document.getElementById('loginBtn');
+  if(!OIDC_ON){
+    loginBtn.setAttribute('href', '#');
+    loginBtn.style.pointerEvents = 'none';
+    loginBtn.style.opacity = '0.6';
+    note.textContent = 'Sign-in is disabled by admin.';
+  } else {
+    note.textContent = '';
+  }
+
+  try{
+    const r = await fetch('/me.json');
+    const { user } = await r.json();
+    const meName = document.getElementById('meName');
+    const meEmail = document.getElementById('meEmail');
+    const meAvatar = document.getElementById('meAvatar');
+    const dash = document.getElementById('dashLink');
+    const logout = document.getElementById('logoutLink');
+
+    if(user){
+      meName.textContent = user.name || 'Signed in';
+      meEmail.textContent = user.email || '';
+      const src = asAvatarSrc(user.picture);
+      if(src){
+        const img = new Image();
+        img.className = 'avatar';
+        img.referrerPolicy = 'no-referrer';
+        img.alt = '';
+        img.src = src;
+        meAvatar.replaceWith(img);
+      }else{
+        meAvatar.textContent = initials(user.name || '?');
+      }
+      dash.style.display = 'inline-flex';
+      logout.style.display = 'inline';
+    }else{
+      meAvatar.textContent = '?';
+    }
+  }catch{}
+})();
+</script>
+</body>
+</html>`;
+
+
 
 // --- UI ---
 const UI_HTML = String.raw`<!doctype html>
