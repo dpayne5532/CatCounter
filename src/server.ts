@@ -64,24 +64,71 @@ app.get("/ui", async (_req, res) => {
   <meta charset="utf-8" />
   <title>Employee Interactions</title>
   <style>
-    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 24px; }
-    header { display:flex; gap:12px; align-items: center; margin-bottom: 16px; }
-    table { border-collapse: collapse; width: 100%; }
-    th, td { border: 1px solid #ddd; padding: 8px; }
-    th { text-align: left; background: #f5f5f5; position: sticky; top: 0; }
-    tr:nth-child(even) { background: #fafafa; }
-    .meta { color: #555; margin-bottom: 8px; }
-    a.button { padding: 8px 12px; border: 1px solid #ddd; background: #fff; border-radius: 6px; text-decoration: none; color: #111; }
-    a.button:hover { background: #f3f3f3; }
+    :root{
+      --green: #0AEF84;          /* primary accent */
+      --green-deep: #0E2F25;     /* primary dark */
+      --forest: #123A2D;         /* supporting */
+      --ink: #0D1A13;            /* near-black text */
+      --mist: #DEEDB8;           /* light accent */
+      --foam: #EEF3EB;           /* very light bg */
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+      margin: 24px;
+      color: var(--ink);
+      background: var(--foam);
+    }
+    header {
+      display:flex; gap:12px; align-items:center; margin-bottom:16px;
+      padding:14px 16px; border-radius:12px;
+      background: var(--green-deep);
+      color: var(--foam);
+    }
+    h2 { margin:0; letter-spacing:0.2px; }
+    a.button {
+      padding: 8px 12px;
+      border-radius: 10px;
+      text-decoration: none;
+      border: 1px solid transparent;
+      background: var(--green);
+      color: var(--ink);
+      font-weight: 600;
+    }
+    a.button:hover { filter: brightness(0.95); }
+    a.button.secondary {
+      background: transparent;
+      border-color: rgba(234, 250, 241, 0.35);
+      color: var(--foam);
+    }
+    .meta { color: var(--forest); margin: 12px 2px 10px; }
+
+    table { border-collapse: collapse; width: 100%; overflow: hidden; border-radius: 12px; }
+    th, td { padding: 10px 12px; border: 1px solid rgba(18,58,45,0.12); }
+    th {
+      text-align: left;
+      position: sticky; top: 0; z-index: 1;
+      background: var(--green-deep);
+      color: var(--foam);
+      letter-spacing: 0.3px;
+    }
+    tbody tr:nth-child(even) { background: #f8fcf9; }
+    tbody tr:nth-child(odd)  { background: #ffffff; }
+    tbody tr:hover { background: var(--mist); }
+    code { background: rgba(14,47,37,0.08); padding:2px 6px; border-radius:6px; }
+    .pill { margin-left:auto; background: rgba(10,239,132,0.18); color:#083924; padding:6px 10px; border-radius: 999px; font-weight:600; font-size:12px; }
   </style>
 </head>
 <body>
   <header>
-    <h2 style="margin:0">Employee Interactions</h2>
+    <h2>Employee Interactions</h2>
     <a class="button" href="/export.csv">Export CSV</a>
-    <a class="button" href="/employee-interactions" target="_blank">View JSON</a>
+    <a class="button secondary" href="/employee-interactions" target="_blank">View JSON</a>
+    <span id="modePill" class="pill"></span>
   </header>
+
   <div class="meta" id="meta"></div>
+
   <table id="tbl">
     <thead>
       <tr>
@@ -95,13 +142,16 @@ app.get("/ui", async (_req, res) => {
     </thead>
     <tbody></tbody>
   </table>
+
 <script>
 (async function(){
   const res = await fetch('/employee-interactions');
   if (!res.ok) { document.body.innerHTML = '<p>Failed to load.</p>'; return; }
   const data = await res.json();
+
+  document.getElementById('modePill').textContent = data.mode;
   document.getElementById('meta').textContent =
-    'Mode: ' + data.mode + ' | Vanity: ' + data.vanity + ' | Org URN: ' + data.orgUrn + ' | Posts scanned: ' + data.postsCount;
+    'Vanity: ' + data.vanity + ' | Org URN: ' + data.orgUrn + ' | Posts scanned: ' + data.postsCount;
 
   const tbody = document.querySelector('#tbl tbody');
   tbody.innerHTML = '';
