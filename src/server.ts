@@ -1,3 +1,4 @@
+// src/server.ts
 import express from "express";
 import rateLimit from "express-rate-limit";
 import pino from "pino";
@@ -33,8 +34,10 @@ app.use(cookieSession({
 }));
 
 /* =========================
-   OIDC (no external library)
+   OIDC (separate LinkedIn app)
    ========================= */
+const OIDC_CLIENT_ID = process.env.OIDC_CLIENT_ID || "";
+const OIDC_CLIENT_SECRET = process.env.OIDC_CLIENT_SECRET || "";
 const OIDC_ENABLED = String(process.env.OIDC_ENABLED || "false").toLowerCase() === "true";
 const OIDC_REDIRECT_URI = process.env.OIDC_REDIRECT_URI || "http://localhost:3000/oidc/callback";
 const OIDC_WELL_KNOWN =
@@ -224,7 +227,7 @@ app.get("/export.csv", async (_req, res) => {
   } catch (e: any) { res.status(500).send("CSV export failed: " + e.message); }
 });
 
-// --- LinkedIn REST OAuth (unchanged) ---
+// --- LinkedIn REST OAuth (App A: Community) ---
 app.get("/login", (_req, res) => {
   if (cfg.mock) return res.send("MOCK mode is on. Set MOCK=false in .env to use real OAuth.");
   const scope = encodeURIComponent("r_organization_social_feed r_organization_social");
@@ -386,7 +389,7 @@ app.get("/admin", requireKey, (_req, res) => {
   res.send(ADMIN_HTML);
 });
 
-// --- OIDC routes (guarded) ---
+// --- OIDC routes (App B: OIDC) ---
 app.get("/login-oidc", async (req, res) => {
   if (!OIDC_ENABLED) return res.status(503).send("OIDC is disabled. Set OIDC_ENABLED=true in .env.");
   try {
@@ -397,15 +400,18 @@ app.get("/login-oidc", async (req, res) => {
 
     const u = new URL(conf.authorization_endpoint);
     u.searchParams.set("response_type", "code");
-    u.searchParams.set("client_id", cfg.clientId);
+    u.searchParams.set("response_mode", "query");
+    u.searchParams.set("client_id", OIDC_CLIENT_ID);
     u.searchParams.set("redirect_uri", OIDC_REDIRECT_URI);
     u.searchParams.set("scope", "openid profile email");
     u.searchParams.set("state", state);
     u.searchParams.set("nonce", nonce);
+    u.searchParams.set("prompt", "consent");
 
     res.redirect(u.toString());
   } catch (e: any) { res.status(500).send("OIDC init error: " + e.message); }
 });
+
 app.get("/oidc/callback", async (req, res) => {
   if (!OIDC_ENABLED) return res.status(503).send("OIDC is disabled.");
   try {
@@ -417,8 +423,8 @@ app.get("/oidc/callback", async (req, res) => {
       grant_type: "authorization_code",
       code,
       redirect_uri: OIDC_REDIRECT_URI,
-      client_id: cfg.clientId,
-      client_secret: cfg.clientSecret,
+      client_id: OIDC_CLIENT_ID,
+      client_secret: OIDC_CLIENT_SECRET,
     });
     const tr = await fetch(conf.token_endpoint, {
       method: "POST",
@@ -429,58 +435,73 @@ app.get("/oidc/callback", async (req, res) => {
     const tokens: any = await tr.json();
 
     // Prefer ID token (decode payload; for prod add signature verify)
-    // Try to get user from ID token first (dev: decode without verify)
     let user: any = null;
     if (tokens.id_token) {
-      const parts = String(tokens.id_token).split(".");
-      if (parts.length === 3) {
+      const payload = String(tokens.id_token).split(".")[1];
+      if (payload) {
         try {
-          const claims = JSON.parse(Buffer.from(parts[1], "base64").toString("utf8"));
-
+          const c = JSON.parse(b64urlDecode(payload));
           const nameFromToken =
-            claims.name ??
-            [claims.given_name, claims.family_name].filter(Boolean).join(" ");
-
+            (c.name ?? [c.given_name, c.family_name].filter(Boolean).join(" ")) || null;
           user = {
-            sub: claims.sub,
-            name: nameFromToken || null,
-            email: claims.email ?? null,
-            picture: claims.picture ?? null,
+            sub: c.sub,
+            name: nameFromToken,
+            email: c.email ?? null,
+            picture: c.picture ?? null,
           };
-        } catch { /* ignore */ }
+        } catch { /* ignore; try userinfo below */ }
       }
     }
 
     // Fallback: UserInfo
-    // Fallback to userinfo endpoint if available
     if (!user && conf.userinfo_endpoint && tokens.access_token) {
       const ur = await fetch(conf.userinfo_endpoint, {
         headers: { Authorization: `Bearer ${tokens.access_token}` },
       });
       if (ur.ok) {
-        const profile: any = await ur.json();
-
+        const p: any = await ur.json();
         const nameFromUI =
-          profile.name ??
-          [profile.given_name, profile.family_name].filter(Boolean).join(" ");
-
+          (p.name ?? [p.given_name, p.family_name].filter(Boolean).join(" ")) || null;
         user = {
-          sub: profile.sub,
-          name: nameFromUI || null,
-          email: profile.email ?? null,
-          picture: profile.picture ?? null,
+          sub: p.sub,
+          name: nameFromUI,
+          email: p.email ?? null,
+          picture: p.picture ?? null,
         };
       }
     }
 
     if (!user) throw new Error("Could not obtain user claims");
-
     req.session = { ...(req.session || {}), user };
     res.redirect("/ui");
   } catch (e: any) { res.status(500).send("OIDC callback error: " + e.message); }
 });
-app.get("/me.json", (req, res) => res.json({ user: req.session?.user || null }));
-app.get("/logout", (req, res) => { req.session = null as any; res.redirect("/ui"); });
+
+// --- OIDC debug helpers ---
+app.get("/oidc/.well-known", async (_req, res) => {
+  if (!OIDC_ENABLED) return res.status(503).send("OIDC disabled");
+  try { res.json(await discover()); }
+  catch (e: any) { res.status(500).send("Discovery error: " + e.message); }
+});
+app.get("/oidc/auth-url", async (req, res) => {
+  if (!OIDC_ENABLED) return res.status(503).send("OIDC disabled");
+  try {
+    const conf = await discover();
+    const state = randomStr();
+    const nonce = randomStr();
+    req.session = { ...(req.session || {}), oidcState: state, oidcNonce: nonce };
+
+    const u = new URL(conf.authorization_endpoint);
+    u.searchParams.set("response_type", "code");
+    u.searchParams.set("response_mode", "query");
+    u.searchParams.set("client_id", OIDC_CLIENT_ID);
+    u.searchParams.set("redirect_uri", OIDC_REDIRECT_URI);
+    u.searchParams.set("scope", "openid profile email");
+    u.searchParams.set("state", state);
+    u.searchParams.set("nonce", nonce);
+    res.type("text/plain").send(u.toString());
+  } catch (e: any) { res.status(500).send("Auth URL error: " + e.message); }
+});
 
 // --- boot ---
 app.listen(cfg.port, () =>
