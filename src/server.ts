@@ -1,19 +1,20 @@
 import express from "express";
 import rateLimit from "express-rate-limit";
 import pino from "pino";
+import fetch from "node-fetch";
+import { randomBytes } from "crypto";
+import cookieSession from "cookie-session";
+import { promises as fsp } from "fs";
+
 import { cfg } from "./config.js";
 import { MockLinkedIn } from "./linkedin/mock.js";
 import { RestLinkedIn, exchangeCodeForToken } from "./linkedin/rest.js";
 import { aggregateToEmployees } from "./logic/aggregate.js";
-import { promises as fsp } from "fs";
-import cookieSession from "cookie-session";
 
-// --- TS augmentation so req.session is typed ---
+// ---- TS augmentation so req.session is typed ----
 declare global {
   namespace Express {
-    interface Request {
-      session?: Record<string, any>;
-    }
+    interface Request { session?: Record<string, any>; }
   }
 }
 
@@ -23,63 +24,49 @@ const app = express();
 app.use(rateLimit({ windowMs: 60_000, max: 60 }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(
-  cookieSession({
-    name: "sid",
-    secret: process.env.SESSION_SECRET || "dev_secret",
-    maxAge: 7 * 24 * 60 * 60 * 1000,
-    httpOnly: true,
-    sameSite: "lax",
-  })
-);
+app.use(cookieSession({
+  name: "sid",
+  secret: process.env.SESSION_SECRET || "dev_secret",
+  maxAge: 7 * 24 * 60 * 60 * 1000,
+  httpOnly: true,
+  sameSite: "lax",
+}));
 
-/* ---------------------------
-   OPTIONAL OIDC (feature flag)
----------------------------- */
-// --- OIDC helpers (robust import) ---
+/* =========================
+   OIDC (no external library)
+   ========================= */
 const OIDC_ENABLED = String(process.env.OIDC_ENABLED || "false").toLowerCase() === "true";
-const OIDC_REDIRECT_URI =
-  process.env.OIDC_REDIRECT_URI || "http://localhost:3000/oidc/callback";
+const OIDC_REDIRECT_URI = process.env.OIDC_REDIRECT_URI || "http://localhost:3000/oidc/callback";
 const OIDC_WELL_KNOWN =
   process.env.OIDC_WELL_KNOWN || "https://www.linkedin.com/oauth/.well-known/openid-configuration";
 
-type OidcExports = {
-  Issuer: any;
-  generators: any;
-  Client: any;
+type OidcConfig = {
+  authorization_endpoint: string;
+  token_endpoint: string;
+  userinfo_endpoint?: string;
+  issuer: string;
 };
+let OIDC_CONF: OidcConfig | null = null;
 
-async function loadOpenId(): Promise<OidcExports> {
-  const mod: any = await import("openid-client");
-  // handle both ESM and CJS style exports
-  const Issuer = mod.Issuer ?? mod.default?.Issuer;
-  const generators = mod.generators ?? mod.default?.generators;
-  const Client = mod.Client ?? mod.default?.Client;
-  if (!Issuer) throw new Error("openid-client import failed (Issuer not found)");
-  return { Issuer, generators, Client };
+async function discover(): Promise<OidcConfig> {
+  if (OIDC_CONF) return OIDC_CONF;
+  const r = await fetch(OIDC_WELL_KNOWN);
+  if (!r.ok) throw new Error(`Discovery failed: ${r.status} ${r.statusText}`);
+  OIDC_CONF = (await r.json()) as OidcConfig;
+  return OIDC_CONF;
 }
 
-let _oidcClient: any = null;
-async function getOidcClient() {
-  if (_oidcClient) return _oidcClient;
-  const { Issuer } = await loadOpenId();
-  const issuer = await Issuer.discover(OIDC_WELL_KNOWN);
-  _oidcClient = new issuer.Client({
-    client_id: cfg.clientId,
-    client_secret: cfg.clientSecret,
-    redirect_uris: [OIDC_REDIRECT_URI],
-    response_types: ["code"],
-  });
-  return _oidcClient;
-}
+const b64url = (b: Buffer) =>
+  b.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+const b64urlDecode = (s: string) =>
+  Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+const randomStr = (len = 24) => b64url(randomBytes(len));
 
-
-/* ---------------------------
-   Aggregation (unchanged)
----------------------------- */
+/* ===============
+   Core aggregation
+   =============== */
 async function fetchAggregated() {
   const li = cfg.mock ? new MockLinkedIn() : new RestLinkedIn();
-
   const orgUrn = await li.getOrgUrnFromVanity(cfg.vanity);
   const posts = await li.getOrgPosts(orgUrn, 100);
 
@@ -109,9 +96,9 @@ async function fetchAggregated() {
   };
 }
 
-/* ---------------------------
+/* ===============================
    employees.json helpers + guard
----------------------------- */
+   =============================== */
 type Emp = { urn: string; name: string };
 async function readEmployees(): Promise<Emp[]> {
   try {
@@ -128,11 +115,7 @@ async function writeEmployees(arr: Emp[]) {
   await fsp.rename(tmp, "./employees.json");
 }
 const ADMIN_KEY = process.env.ADMIN_KEY || "";
-function requireKey(
-  req: express.Request,
-  res: express.Response,
-  next: express.NextFunction
-) {
+function requireKey(req: express.Request, res: express.Response, next: express.NextFunction) {
   const key = String(req.query.key || "");
   if (!ADMIN_KEY || key !== ADMIN_KEY) {
     return res.status(401).send("Unauthorized. Append ?key=YOUR_ADMIN_KEY.");
@@ -140,9 +123,9 @@ function requireKey(
   next();
 }
 
-/* ---------------------------
+/* ======
    Routes
----------------------------- */
+   ====== */
 app.get("/", (_req, res) =>
   res.send(`<h3>LI Employee Interactions</h3>
 <ul>
@@ -154,7 +137,7 @@ app.get("/", (_req, res) =>
 </ul>`)
 );
 
-// --- UI (same look as before) ---
+// --- UI ---
 const UI_HTML = String.raw`<!doctype html>
 <html>
 <head>
@@ -195,11 +178,18 @@ const UI_HTML = String.raw`<!doctype html>
   if (!res.ok) { document.body.innerHTML = '<p>Failed to load.</p>'; return; }
   const data = await res.json();
   document.getElementById('modePill').textContent = data.mode;
-  document.getElementById('meta').textContent = 'Vanity: ' + data.vanity + ' | Org URN: ' + data.orgUrn + ' | Posts scanned: ' + data.postsCount;
+  document.getElementById('meta').textContent =
+    'Vanity: ' + data.vanity + ' | Org URN: ' + data.orgUrn + ' | Posts scanned: ' + data.postsCount;
   const tbody = document.querySelector('#tbl tbody'); tbody.innerHTML = '';
   data.employees.forEach((row, i) => {
     const tr = document.createElement('tr');
-    tr.innerHTML = '<td>'+(i+1)+'</td><td>'+row.name+'</td><td>'+row.total+'</td><td>'+row.reactions+'</td><td>'+row.comments+'</td><td><code>'+row.urn+'</code></td>';
+    tr.innerHTML =
+      '<td>'+(i+1)+'</td>'+
+      '<td>'+row.name+'</td>'+
+      '<td>'+row.total+'</td>'+
+      '<td>'+row.reactions+'</td>'+
+      '<td>'+row.comments+'</td>'+
+      '<td><code>'+row.urn+'</code></td>';
     tbody.appendChild(tr);
   });
 })();
@@ -211,15 +201,12 @@ app.get("/ui", (_req, res) => {
   res.send(UI_HTML);
 });
 
-// ----- JSON + CSV -----
+// --- JSON & CSV ---
 app.get("/employee-interactions", async (_req, res) => {
-  try {
-    const payload = await fetchAggregated();
-    res.json(payload);
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
+  try { res.json(await fetchAggregated()); }
+  catch (e: any) { res.status(500).json({ error: e.message }); }
 });
+
 function toCsv(rows: Array<{ name: string; total: number; reactions: number; comments: number; urn: string }>) {
   const hdr = ["Name", "Total", "Reactions", "Comments", "URN"];
   const esc = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
@@ -234,12 +221,10 @@ app.get("/export.csv", async (_req, res) => {
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="employee-interactions-${vanity}-${mode}.csv"`);
     res.send(csv);
-  } catch (e: any) {
-    res.status(500).send("CSV export failed: " + e.message);
-  }
+  } catch (e: any) { res.status(500).send("CSV export failed: " + e.message); }
 });
 
-// ----- LinkedIn REST OAuth (unchanged) -----
+// --- LinkedIn REST OAuth (unchanged) ---
 app.get("/login", (_req, res) => {
   if (cfg.mock) return res.send("MOCK mode is on. Set MOCK=false in .env to use real OAuth.");
   const scope = encodeURIComponent("r_organization_social_feed r_organization_social");
@@ -263,7 +248,7 @@ app.get("/callback", async (req, res) => {
   }
 });
 
-// ----- Admin mapping -----
+// --- Admin mapping ---
 app.get("/unmapped-urns", requireKey, async (_req, res) => {
   try {
     const li = cfg.mock ? new MockLinkedIn() : new RestLinkedIn();
@@ -274,19 +259,16 @@ app.get("/unmapped-urns", requireKey, async (_req, res) => {
     const bump = (u: string) => counts.set(u, (counts.get(u) || 0) + 1);
     for (const postUrn of posts) {
       const [reactors, commenters] = await Promise.all([li.getReactors(postUrn), li.getCommenters(postUrn)]);
-      reactors.concat(commenters).filter((u) => u?.startsWith("urn:li:person:")).forEach(bump);
+      reactors.concat(commenters).filter(u => u?.startsWith("urn:li:person:")).forEach(bump);
     }
-
-    const known = new Set((await readEmployees()).map((e) => e.urn));
+    const known = new Set((await readEmployees()).map(e => e.urn));
     const unmapped = [...counts.entries()]
       .filter(([urn]) => !known.has(urn))
       .map(([urn, interactions]) => ({ urn, interactions }))
       .sort((a, b) => b.interactions - a.interactions);
 
     res.json({ orgUrn, postsScanned: posts.length, count: unmapped.length, unmapped });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 app.post("/add-employee", requireKey, async (req, res) => {
   try {
@@ -296,60 +278,15 @@ app.post("/add-employee", requireKey, async (req, res) => {
     if (name.length < 2) return res.status(400).json({ error: "Name is required." });
 
     const rows = await readEmployees();
-    if (rows.some((e) => e.urn === urn)) return res.json({ ok: true, message: "Already present." });
+    if (rows.some(e => e.urn === urn)) return res.json({ ok: true, message: "Already present." });
     rows.push({ urn, name });
     rows.sort((a, b) => a.name.localeCompare(b.name));
     await writeEmployees(rows);
     res.json({ ok: true, added: { urn, name } });
-  } catch (e: any) {
-    res.status(500).json({ error: e.message });
-  }
+  } catch (e: any) { res.status(500).json({ error: e.message }); }
 });
 
-// ----- OIDC routes (guarded) -----
-app.get("/login-oidc", async (req, res) => {
-  if (!OIDC_ENABLED) return res.status(503).send("OIDC is disabled. Set OIDC_ENABLED=true in .env.");
-  try {
-    const { generators } = await loadOpenId();
-    const client = await getOidcClient();
-    const state = generators.state();
-    const nonce = generators.nonce();
-    req.session = { ...(req.session || {}), oidcState: state, oidcNonce: nonce };
-    const url = client.authorizationUrl({ scope: "openid profile email", state, nonce });
-    res.redirect(url);
-  } catch (e: any) {
-    res.status(500).send("OIDC init error: " + e.message);
-  }
-});
-
-app.get("/oidc/callback", async (req, res) => {
-  if (!OIDC_ENABLED) return res.status(503).send("OIDC is disabled.");
-  try {
-    const client = await getOidcClient();
-    const params = client.callbackParams(req as any);
-    const tokenSet = await client.callback(OIDC_REDIRECT_URI, params, {
-      state: req.session?.oidcState,
-      nonce: req.session?.oidcNonce,
-    });
-    const claims = tokenSet.claims();
-    req.session = {
-      ...(req.session || {}),
-      user: {
-        sub: claims.sub,
-        name: claims.name || [claims.given_name, claims.family_name].filter(Boolean).join(" "),
-        email: claims.email || null,
-        picture: claims.picture || null,
-      },
-    };
-    res.redirect("/ui");
-  } catch (e: any) {
-    res.status(500).send("OIDC error: " + e.message);
-  }
-});
-app.get("/me.json", (req, res) => res.json({ user: req.session?.user || null }));
-app.get("/logout", (req, res) => { req.session = null as any; res.redirect("/ui"); });
-
-// --- Admin HTML (brand-styled) + route ---
+// --- Admin HTML + route ---
 const ADMIN_HTML = String.raw`<!doctype html>
 <html>
 <head>
@@ -444,14 +381,108 @@ refresh();
 </script>
 </body>
 </html>`;
-
 app.get("/admin", requireKey, (_req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.send(ADMIN_HTML);
 });
 
+// --- OIDC routes (guarded) ---
+app.get("/login-oidc", async (req, res) => {
+  if (!OIDC_ENABLED) return res.status(503).send("OIDC is disabled. Set OIDC_ENABLED=true in .env.");
+  try {
+    const conf = await discover();
+    const state = randomStr();
+    const nonce = randomStr();
+    req.session = { ...(req.session || {}), oidcState: state, oidcNonce: nonce };
 
-// ----- boot -----
+    const u = new URL(conf.authorization_endpoint);
+    u.searchParams.set("response_type", "code");
+    u.searchParams.set("client_id", cfg.clientId);
+    u.searchParams.set("redirect_uri", OIDC_REDIRECT_URI);
+    u.searchParams.set("scope", "openid profile email");
+    u.searchParams.set("state", state);
+    u.searchParams.set("nonce", nonce);
+
+    res.redirect(u.toString());
+  } catch (e: any) { res.status(500).send("OIDC init error: " + e.message); }
+});
+app.get("/oidc/callback", async (req, res) => {
+  if (!OIDC_ENABLED) return res.status(503).send("OIDC is disabled.");
+  try {
+    const conf = await discover();
+    const code = String((req.query as any).code || "");
+    if (!code) throw new Error("Missing code");
+
+    const body = new URLSearchParams({
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: OIDC_REDIRECT_URI,
+      client_id: cfg.clientId,
+      client_secret: cfg.clientSecret,
+    });
+    const tr = await fetch(conf.token_endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body,
+    });
+    if (!tr.ok) throw new Error(`Token error: ${tr.status} ${await tr.text()}`);
+    const tokens: any = await tr.json();
+
+    // Prefer ID token (decode payload; for prod add signature verify)
+    // Try to get user from ID token first (dev: decode without verify)
+    let user: any = null;
+    if (tokens.id_token) {
+      const parts = String(tokens.id_token).split(".");
+      if (parts.length === 3) {
+        try {
+          const claims = JSON.parse(Buffer.from(parts[1], "base64").toString("utf8"));
+
+          const nameFromToken =
+            claims.name ??
+            [claims.given_name, claims.family_name].filter(Boolean).join(" ");
+
+          user = {
+            sub: claims.sub,
+            name: nameFromToken || null,
+            email: claims.email ?? null,
+            picture: claims.picture ?? null,
+          };
+        } catch { /* ignore */ }
+      }
+    }
+
+    // Fallback: UserInfo
+    // Fallback to userinfo endpoint if available
+    if (!user && conf.userinfo_endpoint && tokens.access_token) {
+      const ur = await fetch(conf.userinfo_endpoint, {
+        headers: { Authorization: `Bearer ${tokens.access_token}` },
+      });
+      if (ur.ok) {
+        const profile: any = await ur.json();
+
+        const nameFromUI =
+          profile.name ??
+          [profile.given_name, profile.family_name].filter(Boolean).join(" ");
+
+        user = {
+          sub: profile.sub,
+          name: nameFromUI || null,
+          email: profile.email ?? null,
+          picture: profile.picture ?? null,
+        };
+      }
+    }
+
+    if (!user) throw new Error("Could not obtain user claims");
+
+    req.session = { ...(req.session || {}), user };
+    res.redirect("/ui");
+  } catch (e: any) { res.status(500).send("OIDC callback error: " + e.message); }
+});
+app.get("/me.json", (req, res) => res.json({ user: req.session?.user || null }));
+app.get("/logout", (req, res) => { req.session = null as any; res.redirect("/ui"); });
+
+// --- boot ---
 app.listen(cfg.port, () =>
   log.info(`Server http://localhost:${cfg.port} (mode=${cfg.mock ? "MOCK" : "LIVE"}, oidc=${OIDC_ENABLED ? "on" : "off"})`)
 );
