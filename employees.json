@@ -1,4 +1,5 @@
 [
   { "urn": "urn:li:person:AAA", "name": "Jane Smith" },
-  { "urn": "urn:li:person:BBB", "name": "Alex Johnson" }
+  { "urn": "urn:li:person:BBB", "name": "Dano Payno" },
+  { "urn": "urn:li:person:CCC", "name": "Alex Johnson" }
 ]
