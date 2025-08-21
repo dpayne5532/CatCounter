@@ -36,27 +36,34 @@ app.use(
 /* ---------------------------
    OPTIONAL OIDC (feature flag)
 ---------------------------- */
+// --- OIDC helpers (robust import) ---
 const OIDC_ENABLED = String(process.env.OIDC_ENABLED || "false").toLowerCase() === "true";
 const OIDC_REDIRECT_URI =
   process.env.OIDC_REDIRECT_URI || "http://localhost:3000/oidc/callback";
+const OIDC_WELL_KNOWN =
+  process.env.OIDC_WELL_KNOWN || "https://www.linkedin.com/oauth/.well-known/openid-configuration";
 
-type OidcClient = {
-  authorizationUrl(params: any): string;
-  callbackParams(req: any): any;
-  callback(redirectUri: string, params: any, checks: any): Promise<{ claims(): any }>;
+type OidcExports = {
+  Issuer: any;
+  generators: any;
+  Client: any;
 };
 
-let _oidcClient: OidcClient | null = null;
+async function loadOpenId(): Promise<OidcExports> {
+  const mod: any = await import("openid-client");
+  // handle both ESM and CJS style exports
+  const Issuer = mod.Issuer ?? mod.default?.Issuer;
+  const generators = mod.generators ?? mod.default?.generators;
+  const Client = mod.Client ?? mod.default?.Client;
+  if (!Issuer) throw new Error("openid-client import failed (Issuer not found)");
+  return { Issuer, generators, Client };
+}
 
-// lazy create the client so startup never fails
-async function getOidcClient(): Promise<OidcClient> {
+let _oidcClient: any = null;
+async function getOidcClient() {
   if (_oidcClient) return _oidcClient;
-  // Only import/openid-client if enabled to avoid runtime/type noise
-  const { Issuer } = await import("openid-client");
-  // LinkedIn’s well-known lives under /oauth
-  const issuer = await Issuer.discover(
-    "https://www.linkedin.com/oauth/.well-known/openid-configuration"
-  );
+  const { Issuer } = await loadOpenId();
+  const issuer = await Issuer.discover(OIDC_WELL_KNOWN);
   _oidcClient = new issuer.Client({
     client_id: cfg.clientId,
     client_secret: cfg.clientSecret,
@@ -65,6 +72,7 @@ async function getOidcClient(): Promise<OidcClient> {
   });
   return _oidcClient;
 }
+
 
 /* ---------------------------
    Aggregation (unchanged)
@@ -302,7 +310,7 @@ app.post("/add-employee", requireKey, async (req, res) => {
 app.get("/login-oidc", async (req, res) => {
   if (!OIDC_ENABLED) return res.status(503).send("OIDC is disabled. Set OIDC_ENABLED=true in .env.");
   try {
-    const { generators } = await import("openid-client");
+    const { generators } = await loadOpenId();
     const client = await getOidcClient();
     const state = generators.state();
     const nonce = generators.nonce();
@@ -313,6 +321,7 @@ app.get("/login-oidc", async (req, res) => {
     res.status(500).send("OIDC init error: " + e.message);
   }
 });
+
 app.get("/oidc/callback", async (req, res) => {
   if (!OIDC_ENABLED) return res.status(503).send("OIDC is disabled.");
   try {
