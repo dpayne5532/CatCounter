@@ -5,6 +5,7 @@
     "target": "es2022",
     "rootDir": "src",
     "outDir": "dist",
+    "noEmitOnError": false,
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "strict": true,
