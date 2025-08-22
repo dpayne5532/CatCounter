@@ -367,7 +367,7 @@ function initials(n){
   return (n||"").trim().split(/\s+/).map(s=>s[0]||"").slice(0,2).join("").toUpperCase();
 }
 
-// turn a stored avatar value into a safe <img src>
+// turn a stored avatar value into a safe a <img src>
 // - local: "/avatars/jane.jpg"   -> use as-is
 // - remote: "https://media.licdn.com/..." -> /avatar-proxy?u=...
 function asAvatarSrc(url){
