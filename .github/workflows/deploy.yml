@@ -1,0 +1,35 @@
+name: Build and deploy to Azure Web App
+
+on:
+  push:
+    branches: [ master ]
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+      - run: npm run build
+
+      - name: AppService build (Oryx)
+        id: oryx
+        uses: azure/appservice-build@v3
+        with:
+          platform: node
+          platform-version: '20'
+          source-directory: .
+
+      - name: Deploy to Azure Web App
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: catalystcount             # <-- your Web App name
+          package: ${{ steps.oryx.outputs.app-package-path }}
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE }}
