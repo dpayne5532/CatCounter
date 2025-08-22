@@ -28,7 +28,7 @@ jobs:
         run: npm ci
 
       - name: Build project
-        run: npm run build --if-present || echo "Build skipped"
+        run: npm run build --if-present || echo "Build skipped" 
 
       - name: 'Login to Azure with OIDC'
         uses: azure/login@v1
