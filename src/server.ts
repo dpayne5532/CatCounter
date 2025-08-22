@@ -223,7 +223,7 @@ const LANDING_HTML = String.raw`<!doctype html>
 <body>
   <main class="card">
     <header>
-      <h1 style="margin:0">Employee Interactions</h1>
+      <h1 style="margin:0">Catalyst Count</h1>
       <span id="modePill" class="pill"></span>
     </header>
     <p class="lead">See which employees are engaging with your company posts on LinkedIn.</p>
@@ -258,7 +258,7 @@ const LANDING_HTML = String.raw`<!doctype html>
           </div>
         </div>
       </div>
-      <div class="muted">Need to add names/avatars manually? Open <code>/admin?key=YOUR_ADMIN_KEY</code></div>
+      
     </section>
   </main>
 
