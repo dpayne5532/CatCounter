@@ -23,9 +23,12 @@ declare global {
 
 const log = pino({ level: "info" });
 const app = express();
+
 const ALLOWED_AVATAR_HOSTS = (process.env.AVATAR_HOSTS ||
   "media.licdn.com,lh3.googleusercontent.com"
-).split(",").map(h => h.trim().toLowerCase());
+)
+  .split(",")
+  .map((h) => h.trim().toLowerCase());
 
 app.use(rateLimit({ windowMs: 60_000, max: 60 }));
 app.use(express.json());
@@ -43,9 +46,8 @@ app.use(
 // Serve local avatar files, e.g. /avatars/dan.jpg
 app.use("/avatars", express.static("public/avatars", { maxAge: "7d" }));
 
-// serve /public (for /avatars/*.jpg etc.)
+// Serve /public (for /avatars/*.jpg etc.)
 app.use(express.static("public", { maxAge: "1d" }));
-
 
 /* =========================
    OIDC (separate LinkedIn app)
@@ -77,7 +79,11 @@ async function discover(): Promise<OidcConfig> {
 }
 
 const b64url = (b: Buffer) =>
-  b.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  b
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
 const b64urlDecode = (s: string) =>
   Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
 const randomStr = (len = 24) => b64url(randomBytes(len));
@@ -147,6 +153,7 @@ async function writeEmployees(arr: Emp[]) {
   await fsp.writeFile(tmp, JSON.stringify(arr, null, 2), "utf8");
   await fsp.rename(tmp, "./employees.json");
 }
+
 const ADMIN_KEY = process.env.ADMIN_KEY || "";
 function requireKey(
   req: express.Request,
@@ -167,8 +174,6 @@ app.get("/", (_req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.send(LANDING_HTML);
 });
-
-
 
 // --- Landing Page (/) ---
 const LANDING_HTML = String.raw`<!doctype html>
@@ -197,9 +202,7 @@ const LANDING_HTML = String.raw`<!doctype html>
     .pill{margin-left:auto; background:rgba(10,239,132,.18); color:#083924; padding:6px 10px; border-radius:999px; font-weight:600; font-size:12px}
     h1{margin:4px 0 6px; letter-spacing:.2px}
     p.lead{margin:0; color:#294038}
-    .hero{
-      margin-top:18px; display:grid; grid-template-columns:1fr; gap:16px;
-    }
+    .hero{margin-top:18px; display:grid; grid-template-columns:1fr; gap:16px;}
     .cta-row{display:flex; gap:10px; flex-wrap:wrap; align-items:center}
     a.btn{
       display:inline-flex; align-items:center; gap:8px;
@@ -209,9 +212,7 @@ const LANDING_HTML = String.raw`<!doctype html>
     a.btn:hover{filter:brightness(.96)}
     a.btn.secondary{background:transparent; border-color:rgba(18,58,45,.2); color:var(--ink); font-weight:600}
     .muted{color:#426050; font-size:13px}
-    .split{
-      margin-top:18px; display:grid; grid-template-columns: 1fr 1fr; gap:16px;
-    }
+    .split{margin-top:18px; display:grid; grid-template-columns: 1fr 1fr; gap:16px;}
     .panel{border:1px solid rgba(18,58,45,.12); border-radius:12px; padding:14px}
     .me{display:flex; align-items:center; gap:10px}
     .avatar{width:36px; height:36px; border-radius:50%; object-fit:cover; border:1px solid rgba(0,0,0,.08); background:#fff}
@@ -276,7 +277,6 @@ function asAvatarSrc(url){
 
 (async function init(){
   document.getElementById('modePill').textContent = ${JSON.stringify(cfg.mock ? "MOCK" : "LIVE")};
-
   const note = document.getElementById('oidcNote');
   const loginBtn = document.getElementById('loginBtn');
   if(!OIDC_ON){
@@ -284,10 +284,7 @@ function asAvatarSrc(url){
     loginBtn.style.pointerEvents = 'none';
     loginBtn.style.opacity = '0.6';
     note.textContent = 'Sign-in is disabled by admin.';
-  } else {
-    note.textContent = '';
   }
-
   try{
     const r = await fetch('/me.json');
     const { user } = await r.json();
@@ -296,7 +293,6 @@ function asAvatarSrc(url){
     const meAvatar = document.getElementById('meAvatar');
     const dash = document.getElementById('dashLink');
     const logout = document.getElementById('logoutLink');
-
     if(user){
       meName.textContent = user.name || 'Signed in';
       meEmail.textContent = user.email || '';
@@ -322,93 +318,94 @@ function asAvatarSrc(url){
 </body>
 </html>`;
 
-
-
 // --- UI ---
-const UI_HTML = String.raw`<!doctype html>
-<html>
+const UI_HTML = String.raw`<!DOCTYPE html>
+<html lang="en">
 <head>
-  <meta charset="utf-8" />
+  <meta charset="UTF-8">
   <title>Employee Interactions</title>
   <style>
-    :root{--green:#0AEF84;--green-deep:#0E2F25;--forest:#123A2D;--ink:#0D1A13;--mist:#DEEDB8;--foam:#EEF3EB;}
-    *{box-sizing:border-box}
-    body{font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial;margin:24px;color:var(--ink);background:var(--foam)}
-    header{display:flex;gap:12px;align-items:center;margin-bottom:16px;padding:14px 16px;border-radius:12px;background:var(--green-deep);color:var(--foam)}
-    h2{margin:0}
-    a.button{padding:8px 12px;border-radius:10px;text-decoration:none;border:1px solid transparent;background:var(--green);color:var(--ink);font-weight:600}
-    a.button.secondary{background:transparent;border-color:rgba(234,250,241,.35);color:var(--foam)}
-    .meta{color:var(--forest);margin:12px 2px 10px}
-    table{border-collapse:collapse;width:100%;overflow:hidden;border-radius:12px}
-    th,td{padding:10px 12px;border:1px solid rgba(18,58,45,.12)}
-    th{text-align:left;position:sticky;top:0;z-index:1;background:var(--green-deep);color:var(--foam);letter-spacing:.3px}
-    tbody tr:nth-child(even){background:#f8fcf9} tbody tr:nth-child(odd){background:#fff} tbody tr:hover{background:var(--mist)}
-    code{background:rgba(14,47,37,.08);padding:2px 6px;border-radius:6px}
-    .pill{margin-left:auto;background:rgba(10,239,132,.18);color:#083924;padding:6px 10px;border-radius:999px;font-weight:600;font-size:12px}
-    .namecell{display:flex;align-items:center;gap:10px}
-    .avatar{width:28px;height:28px;border-radius:50%;object-fit:cover;border:1px solid rgba(0,0,0,.08);background:#fff}
-    .avatar--placeholder{width:28px;height:28px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;background:#DEEDB8;color:#0D1A13;font-weight:700;font-size:12px;border:1px solid rgba(0,0,0,.06)}
+    body { font-family: Arial, sans-serif; background: #f2f7f2; margin: 0; padding: 0; }
+    header { background: #0b2e24; color: white; padding: 1rem; display: flex; align-items: center; justify-content: space-between; }
+    header h1 { margin: 0; font-size: 1.5rem; }
+    button { margin-left: 0.5rem; padding: 0.5rem 1rem; background: #00b44e; border: none; border-radius: 4px; color: white; cursor: pointer; font-weight: bold; }
+    button:hover { background: #00913c; }
+    table { border-collapse: collapse; width: 100%; margin: 1rem 0; background: white; }
+    th, td { border: 1px solid #ddd; padding: 0.75rem; text-align: left; }
+    th { background: #0b2e24; color: white; }
+    tr:nth-child(even) { background: #f9f9f9; }
+    tr:hover { background: #e1f5e0; }
+    .meta { margin: 0.5rem 1rem; font-size: 0.9rem; color: #333; }
+    .avatar { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; }
   </style>
 </head>
 <body>
   <header>
-    <h2>Employee Interactions</h2>
-    <a class="button" href="/export.csv">Export CSV</a>
-    <a class="button secondary" href="/employee-interactions" target="_blank">View JSON</a>
-    <span id="modePill" class="pill"></span>
+    <h1>Employee Interactions</h1>
+    <div>
+      <button onclick="exportCSV()">Export CSV</button>
+      <button onclick="window.location.href='/employee-interactions'">View JSON</button>
+    </div>
   </header>
-  <div class="meta" id="meta"></div>
-  <table id="tbl">
-    <thead><tr><th>#</th><th>Name</th><th>Total</th><th>Reactions</th><th>Comments</th><th>URN</th></tr></thead>
-    <tbody></tbody>
-  </table>
+
+  <p class="meta" id="meta"></p>
+
+  <table id="employeeTable">
+  <thead>
+    <tr>
+      <th>#</th>
+      <th>Name</th>
+      <th>Total</th>
+      <th>Reactions</th>
+      <th>Comments</th>
+      <th>URN</th>
+    </tr>
+  </thead>
+  <tbody></tbody>
+</table>
+
 <script>
-function initials(n){
-  return (n||"").trim().split(/\s+/).map(s=>s[0]||"").slice(0,2).join("").toUpperCase();
-}
+  async function fetchData() {
+    try {
+      const res = await fetch('/employee-interactions');
+      const data = await res.json();
 
-// turn a stored avatar value into a safe <img src>
-// - local: "/avatars/jane.jpg"   -> use as-is
-// - remote: "https://media.licdn.com/..." -> /avatar-proxy?u=...
-function asAvatarSrc(url){
-  if (!url) return "";
-  try {
-    if (url.startsWith("/")) return url;                         // local file
-    if (/^https?:\/\//i.test(url)) return "/avatar-proxy?u="+encodeURIComponent(url); // proxied
-  } catch {}
-  return "";
-}
-(async function(){
-  const res = await fetch('/employee-interactions');
-  if (!res.ok) { document.body.innerHTML = '<p>Failed to load.</p>'; return; }
-  const data = await res.json();
-  document.getElementById('modePill').textContent = data.mode;
-  document.getElementById('meta').textContent =
-    'Vanity: ' + data.vanity + ' | Org URN: ' + data.orgUrn + ' | Posts scanned: ' + data.postsCount;
+      document.getElementById('meta').textContent =
+        'Vanity: ' + data.vanity + 
+        ' | Org URN: ' + data.orgUrn + 
+        ' | Posts scanned: ' + data.postCount;
 
-  const tbody = document.querySelector('#tbl tbody'); 
-  tbody.innerHTML = '';
+      const tbody = document.querySelector('#employeeTable tbody');
+      tbody.innerHTML = "";
 
-  data.employees.forEach((row, i) => {
-    const src = asAvatarSrc(row.avatar);
-    const imgHtml = src
-      ? '<img class="avatar" src="'+src+'" referrerpolicy="no-referrer" alt="">'
-      : '<span class="avatar avatar--placeholder">'+initials(row.name)+'</span>';
-
-    const tr = document.createElement('tr');
-    tr.innerHTML =
-      '<td>'+(i+1)+'</td>'+
-      '<td><div class="namecell">'+ imgHtml + '<span>'+row.name+'</span></div></td>'+
-      '<td>'+row.total+'</td>'+
-      '<td>'+row.reactions+'</td>'+
-      '<td>'+row.comments+'</td>'+
-      '<td><code>'+row.urn+'</code></td>';
-    tbody.appendChild(tr);
-  });
-})();
+      data.employees.forEach((row, i) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML =
+          '<td>' + (i + 1) + '</td>' +
+          '<td>' +
+            (row.avatar 
+              ? '<img src="' + row.avatar + '" alt="avatar" class="avatar" style="margin-right:8px;">'
+              : ''
+            ) +
+            (row.name || "Unknown") +
+          '</td>' +
+          '<td>' + row.total + '</td>' +
+          '<td>' + row.reactions + '</td>' +
+          '<td>' + row.comments + '</td>' +
+          '<td><code>' + row.urn + '</code></td>';
+        tbody.appendChild(tr);
+      });
+    } catch (err) {
+      console.error('Error loading data', err);
+    }
+  }
+  fetchData();
 </script>
 </body>
 </html>`;
+
+
+
 app.get("/ui", (_req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.send(UI_HTML);
@@ -428,7 +425,7 @@ app.get("/avatar-proxy", async (req, res) => {
     res.setHeader("Content-Type", ct);
     res.setHeader("Cache-Control", "public, max-age=86400");
     res.end(buf);
-  } catch (e: any) {
+  } catch {
     res.status(404).end();
   }
 });
@@ -455,10 +452,12 @@ function toCsv(
   const hdr = ["Name", "Total", "Reactions", "Comments", "URN"];
   const esc = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
   const lines = [hdr.map(esc).join(",")];
-  for (const r of rows)
+  for (const r of rows) {
     lines.push([r.name, r.total, r.reactions, r.comments, r.urn].map(esc).join(","));
+  }
   return lines.join("\n");
 }
+
 app.get("/export.csv", async (_req, res) => {
   try {
     const { employees, vanity, mode } = await fetchAggregated();
@@ -476,8 +475,9 @@ app.get("/export.csv", async (_req, res) => {
 
 // --- LinkedIn REST OAuth (App A: Community) ---
 app.get("/login", (_req, res) => {
-  if (cfg.mock)
+  if (cfg.mock) {
     return res.send("MOCK mode is on. Set MOCK=false in .env to use real OAuth.");
+  }
   const scope = encodeURIComponent("r_organization_social_feed r_organization_social");
   const url =
     `https://www.linkedin.com/oauth/v2/authorization` +
@@ -487,6 +487,7 @@ app.get("/login", (_req, res) => {
     `&state=xyz`;
   res.redirect(url);
 });
+
 app.get("/callback", async (req, res) => {
   if (cfg.mock) return res.send("MOCK mode. Set MOCK=false to complete OAuth.");
   try {
@@ -510,16 +511,17 @@ app.get("/unmapped-urns", requireKey, async (_req, res) => {
 
     const counts = new Map<string, number>();
     const bump = (u: string) => counts.set(u, (counts.get(u) || 0) + 1);
+
     for (const postUrn of posts) {
       const [reactors, commenters] = await Promise.all([
         li.getReactors(postUrn),
         li.getCommenters(postUrn),
       ]);
-      reactors
-        .concat(commenters)
+      reactors.concat(commenters)
         .filter((u) => u?.startsWith("urn:li:person:"))
         .forEach(bump);
     }
+
     const known = new Set((await readEmployees()).map((e) => e.urn));
     const unmapped = [...counts.entries()]
       .filter(([urn]) => !known.has(urn))
@@ -531,6 +533,7 @@ app.get("/unmapped-urns", requireKey, async (_req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
 app.post("/add-employee", requireKey, async (req, res) => {
   try {
     const urn = String(req.body?.urn || "").trim();
@@ -538,10 +541,9 @@ app.post("/add-employee", requireKey, async (req, res) => {
     const avatarRaw = String(req.body?.avatar || "").trim();
     const avatar = avatarRaw ? avatarRaw : undefined;
 
-    if (!urn.startsWith("urn:li:person:"))
-      return res
-        .status(400)
-        .json({ error: "Valid person URN required (urn:li:person:...). " });
+    if (!urn.startsWith("urn:li:person:")) {
+      return res.status(400).json({ error: "Valid person URN required (urn:li:person:...)." });
+    }
     if (name.length < 2) return res.status(400).json({ error: "Name is required." });
 
     const rows = await readEmployees();
@@ -659,11 +661,11 @@ refresh();
 </script>
 </body>
 </html>`;
+
 app.get("/admin", requireKey, (_req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.send(ADMIN_HTML);
 });
-
 // --- OIDC routes (App B: OIDC) ---
 app.get("/login-oidc", async (req, res) => {
   if (!OIDC_ENABLED)
@@ -712,14 +714,13 @@ app.get("/oidc/callback", async (req, res) => {
     if (!tr.ok) throw new Error(`Token error: ${tr.status} ${await tr.text()}`);
     const tokens: any = await tr.json();
 
-    // Prefer ID token (decode payload; for prod add signature verify)
+    // --- ID Token parse ---
     let user: any = null;
     if (tokens.id_token) {
       const payload = String(tokens.id_token).split(".")[1];
       if (payload) {
         try {
           const c = JSON.parse(b64urlDecode(payload));
-          // name
           let nameFromToken: string | null = null;
           if (typeof c.name === "string" && c.name.trim()) {
             nameFromToken = c.name.trim();
@@ -734,12 +735,12 @@ app.get("/oidc/callback", async (req, res) => {
             picture: typeof c.picture === "string" ? c.picture : null,
           };
         } catch {
-          // ignore; try userinfo below
+          // ignore; fallback to userinfo
         }
       }
     }
 
-    // Fallback: UserInfo
+    // --- Fallback: UserInfo ---
     if (!user && conf.userinfo_endpoint && tokens.access_token) {
       const ur = await fetch(conf.userinfo_endpoint, {
         headers: { Authorization: `Bearer ${tokens.access_token}` },
@@ -764,16 +765,12 @@ app.get("/oidc/callback", async (req, res) => {
 
     if (!user) throw new Error("Could not obtain user claims");
 
-    // Store session user
+    // --- Save session ---
     req.session = { ...(req.session || {}), user };
 
-    // ---- Auto-upsert this member into employees.json (name + avatar) ----
-    // LinkedIn OIDC 'sub' is usually a member id; sometimes a URN.
+    // --- Auto-upsert employee into employees.json ---
     const subStr = String(user.sub || "");
-    const myUrn = subStr.startsWith("urn:")
-      ? subStr
-      : `urn:li:person:${subStr}`;
-
+    const myUrn = subStr.startsWith("urn:") ? subStr : `urn:li:person:${subStr}`;
     try {
       const rows = await readEmployees();
       const idx = rows.findIndex((e) => e.urn === myUrn);
@@ -790,9 +787,8 @@ app.get("/oidc/callback", async (req, res) => {
       rows.sort((a, b) => a.name.localeCompare(b.name));
       await writeEmployees(rows);
     } catch {
-      // non-fatal; continue to UI
+      // non-fatal
     }
-    // ---------------------------------------------------------------------
 
     res.redirect("/ui");
   } catch (e: any) {
@@ -809,6 +805,7 @@ app.get("/oidc/.well-known", async (_req, res) => {
     res.status(500).send("Discovery error: " + e.message);
   }
 });
+
 app.get("/oidc/auth-url", async (req, res) => {
   if (!OIDC_ENABLED) return res.status(503).send("OIDC disabled");
   try {
@@ -831,20 +828,19 @@ app.get("/oidc/auth-url", async (req, res) => {
   }
 });
 
-// Simple helpers to check session / logout if you want them
+// --- Simple helpers to check session / logout ---
 app.get("/me.json", (req, res) => {
   res.json({ user: req.session?.user || null });
 });
+
 app.get("/logout", (req, res) => {
   req.session = null as any;
   res.redirect("/ui");
 });
 
 // --- boot ---
-app.listen(cfg.port, () =>
+app.listen(cfg.port, () => {
   log.info(
-    `Server http://localhost:${cfg.port} (mode=${cfg.mock ? "MOCK" : "LIVE"}, oidc=${
-      OIDC_ENABLED ? "on" : "off"
-    })`
-  )
-);
+    `Server running at http://localhost:${cfg.port} (mode=${cfg.mock ? "MOCK" : "LIVE"}, oidc=${OIDC_ENABLED ? "on" : "off"})`
+  );
+});
