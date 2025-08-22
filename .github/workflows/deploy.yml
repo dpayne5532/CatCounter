@@ -9,27 +9,25 @@ jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     steps:
+      # Checkout repo
       - uses: actions/checkout@v4
 
+      # Setup Node
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
 
+      # Install dependencies
       - run: npm ci
+
+      # Build TypeScript → dist/
       - run: npm run build
 
-      - name: AppService build (Oryx)
-        id: oryx
-        uses: azure/appservice-build@v3
-        with:
-          platform: node
-          platform-version: '20'
-          source-directory: .
-
-      - name: Deploy to Azure Web App
+      # Deploy to Azure Web App
+      - name: 'Deploy to Azure WebApp'
         uses: azure/webapps-deploy@v2
         with:
-          app-name: catalystcount             # <-- your Web App name
-          package: ${{ steps.oryx.outputs.app-package-path }}
-          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE }}
+          app-name: 'catalystcount' # your Azure WebApp name
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          package: .
