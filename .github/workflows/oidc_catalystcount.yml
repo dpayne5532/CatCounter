@@ -40,5 +40,5 @@ jobs:
       - name: 'Deploy to Azure WebApp'
         uses: azure/webapps-deploy@v2
         with:
-          app-name: 'catalystcount' # your Azure Web App name
+          app-name: 'catalystcount' # your Azure Web App nam
           package: .
