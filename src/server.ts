@@ -77,11 +77,14 @@ function requireKey(
   next();
 }
 
-// ====== Core aggregation ======
+// ====== Core aggregation with debug logs ======
 async function fetchAggregated() {
   const li = cfg.mock ? new MockLinkedIn() : new RestLinkedIn();
   const orgUrn = await li.getOrgUrnFromVanity(cfg.vanity);
+  log.info({ orgUrn }, "Resolved org URN");
+
   const posts = await li.getOrgPosts(orgUrn, 10);
+  log.info({ count: posts.length }, "Fetched org posts");
 
   const tallies = new Map<string, { reactions: number; comments: number }>();
   const bump = (urn: string, key: "reactions" | "comments") => {
@@ -91,26 +94,33 @@ async function fetchAggregated() {
   };
 
   for (const postUrn of posts) {
-    const [reactors, commenters] = await Promise.all([
-      li.getReactors(postUrn),
-      li.getCommenters(postUrn),
-    ]);
-    reactors.forEach((u) => bump(u, "reactions"));
-    commenters.forEach((u) => bump(u, "comments"));
+    try {
+      log.info({ postUrn }, "Fetching engagement for post");
+      const [reactors, commenters] = await Promise.all([
+        li.getReactors(postUrn),
+        li.getCommenters(postUrn),
+      ]);
+      log.info({ postUrn, reactors, commenters }, "Engagement results");
+
+      reactors.forEach((u) => bump(u, "reactions"));
+      commenters.forEach((u) => bump(u, "comments"));
+    } catch (err: any) {
+      log.error({ postUrn, err }, "Error fetching engagement");
+    }
   }
 
   const employees = aggregateToEmployees(tallies);
+  log.info({ employeesCount: employees.length }, "Aggregated employees");
+
   const directory = new Map((await readEmployees()).map((e) => [e.urn, e]));
-
-const enriched = employees.map((r: any) => {
-  const m = directory.get(r.urn) as Emp | undefined;
-  return {
-    ...r,
-    name: m?.name || r.urn,   // fallback: show urn as name
-    avatar: m?.avatar || null,
-  };
-});
-
+  const enriched = employees.map((r: any) => {
+    const m = directory.get(r.urn) as Emp | undefined;
+    return {
+      ...r,
+      name: m?.name || r.urn,   // fallback: show URN as name
+      avatar: m?.avatar || null,
+    };
+  });
 
   return {
     mode: cfg.mock ? "MOCK" : "LIVE",
@@ -122,28 +132,22 @@ const enriched = employees.map((r: any) => {
 }
 
 // ====== Routes ======
-
-// Landing page
 app.get("/", (_req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.send(`<h1>Catalyst Count</h1><p><a href="/ui">Go to Dashboard</a></p>`);
 });
 
-// UI
 app.get("/ui", (_req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.send(`<h2>Dashboard</h2><p>Go to <a href="/employee-interactions">/employee-interactions</a></p>`);
 });
 
-// Avatar proxy
 app.get("/avatar-proxy", async (req, res) => {
   try {
     const u = String(req.query.u || "");
     if (!u.startsWith("http")) throw new Error("bad url");
-
     const r = await fetch(u);
     if (!r.ok) throw new Error(`upstream ${r.status}`);
-
     const ct = r.headers.get("content-type") || "image/jpeg";
     const buf = Buffer.from(await r.arrayBuffer());
     res.setHeader("Content-Type", ct);
@@ -154,7 +158,6 @@ app.get("/avatar-proxy", async (req, res) => {
   }
 });
 
-// Employee interactions
 app.get("/employee-interactions", async (_req, res) => {
   try {
     res.json(await fetchAggregated());
@@ -163,7 +166,6 @@ app.get("/employee-interactions", async (_req, res) => {
   }
 });
 
-// Export CSV
 app.get("/export.csv", async (_req, res) => {
   try {
     const { employees, vanity, mode } = await fetchAggregated();
@@ -182,7 +184,6 @@ app.get("/export.csv", async (_req, res) => {
   }
 });
 
-// OAuth routes (LinkedIn App A)
 app.get("/login", (_req, res) => {
   if (cfg.mock)
     return res.send("MOCK mode is on. Set MOCK=false in .env to use real OAuth.");
@@ -195,6 +196,7 @@ app.get("/login", (_req, res) => {
     `&state=xyz`;
   res.redirect(url);
 });
+
 app.get("/callback", async (req, res) => {
   if (cfg.mock) return res.send("MOCK mode. Set MOCK=false to complete OAuth.");
   try {
@@ -207,7 +209,7 @@ app.get("/callback", async (req, res) => {
   }
 });
 
-// --- Debug route: LinkedIn API test ---
+// Debug: test LinkedIn /me
 app.get("/test-linkedin", async (_req, res) => {
   try {
     const me = await httpGet("https://api.linkedin.com/v2/me");
